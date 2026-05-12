@@ -1,12 +1,13 @@
 import { Layer, Canvas, PatternKind, Pattern } from '../state/project';
 import { renderGeometric, defaultGeometricParams } from './geometric';
 import { renderFrieze } from './frieze';
+import { renderScatter } from './scatter';
 
 export function renderLayer(layer: Layer, canvas: Canvas): SVGElement[] {
   switch (layer.pattern.kind) {
     case 'geometric': return renderGeometric(layer.pattern.params, canvas);
     case 'frieze':    return renderFrieze(layer.pattern.params, canvas);
-    case 'scatter':   return [];   // implemented in Task 9
+    case 'scatter':   return renderScatter(layer.pattern.params, canvas);
     case 'text':      return [];   // implemented in Task 10
   }
 }
