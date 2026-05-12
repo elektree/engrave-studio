@@ -1,18 +1,21 @@
 import './style.css';
-import { Store, defaultProject, makeLayer } from './state/project';
+import { Store, makeLayer } from './state/project';
+import { loadProject, attachAutosave } from './state/persistence';
 import { mountCanvasPanel } from './ui/canvas-panel';
 import { mountLayersPanel } from './ui/layers-panel';
 import { mountPropsPanel } from './ui/props-panel';
 import { defaultPatternForKind } from './patterns';
 
-const store = new Store(defaultProject());
+const store = new Store(loadProject());
+attachAutosave(store);
 
-// Seed one geometric layer so the preview is not blank
-store.update((p) => {
-  const l = makeLayer(defaultPatternForKind('geometric'), 'Geometric 1');
-  p.layers = [l];
-  p.selectedLayerId = l.id;
-});
+if (store.get().layers.length === 0) {
+  store.update((p) => {
+    const l = makeLayer(defaultPatternForKind('geometric'), 'Geometric 1');
+    p.layers = [l];
+    p.selectedLayerId = l.id;
+  });
+}
 
 const app = document.getElementById('app')!;
 app.innerHTML = `
