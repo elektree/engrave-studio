@@ -1,2 +1,6 @@
 import { defineConfig } from 'vite';
-export default defineConfig({ server: { open: true } });
+
+export default defineConfig({
+  base: '/engrave-studio/',
+  server: { open: true },
+});
