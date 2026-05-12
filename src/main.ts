@@ -1,12 +1,25 @@
 import './style.css';
-import { Store, defaultProject } from './state/project';
+import { Store, defaultProject, makeLayer } from './state/project';
+import { mountCanvasPanel } from './ui/canvas-panel';
+import { defaultPatternForKind } from './patterns';
 
 const store = new Store(defaultProject());
 
-const app = document.getElementById('app')!;
-const probe = document.createElement('pre');
-app.appendChild(probe);
+// Seed one geometric layer so the preview is not blank
+store.update((p) => {
+  const l = makeLayer(defaultPatternForKind('geometric'), 'Geometric 1');
+  p.layers = [l];
+  p.selectedLayerId = l.id;
+});
 
-const render = () => { probe.textContent = JSON.stringify(store.get(), null, 2); };
-store.subscribe(render);
-render();
+const app = document.getElementById('app')!;
+app.innerHTML = `
+  <header class="app-header"></header>
+  <main class="app-main">
+    <aside class="layers"></aside>
+    <section class="canvas"></section>
+    <aside class="props"></aside>
+  </main>
+`;
+
+mountCanvasPanel(app.querySelector('.canvas') as HTMLElement, store);
