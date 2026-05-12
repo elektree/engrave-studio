@@ -1,0 +1,1 @@
+- [No tests for this project](project_no_tests.md) — Skip all test scaffolding for the engrave pattern generator.
