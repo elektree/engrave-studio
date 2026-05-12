@@ -70,8 +70,12 @@ export function mountHeader(container: HTMLElement, store: Store): void {
 
   function numberInput(value: number, step: number, onChange: (v: number) => void): HTMLInputElement {
     const i = document.createElement('input');
-    i.type = 'number'; i.value = String(value); i.step = String(step); i.style.width = '80px';
-    i.oninput = () => onChange(Number(i.value));
+    i.type = 'number'; i.value = String(value); i.step = String(step); i.min = '1'; i.style.width = '80px';
+    i.oninput = () => {
+      const v = Number(i.value);
+      if (!Number.isFinite(v) || v < 1) return;
+      onChange(v);
+    };
     return i;
   }
   function label(text: string, input: HTMLElement): HTMLElement {

@@ -48,7 +48,21 @@ export async function exportLaserSvg(
     viewBox: `0 0 ${W} ${H}`,
   });
 
-  let maskGroup: SVGGElement | null = null;
+  // A mask layer wraps the preceding contiguous block of normal layers in a clipPath
+  // built from its own geometry. Block resets at each mask boundary.
+  const pending: SVGElement[] = [];
+  const flushPending = (clipPath: string | null): void => {
+    if (pending.length === 0) return;
+    if (clipPath) {
+      const wrap = svgEl('g', { 'clip-path': clipPath });
+      for (const e of pending) wrap.appendChild(e);
+      svg.appendChild(wrap);
+    } else {
+      for (const e of pending) svg.appendChild(e);
+    }
+    pending.length = 0;
+  };
+
   for (const layer of project.layers) {
     if (!layer.visible) continue;
 
@@ -66,26 +80,24 @@ export async function exportLaserSvg(
       for (const e of elements) cp.appendChild(e.cloneNode(true) as SVGElement);
       defs.appendChild(cp);
       svg.appendChild(defs);
-
-      maskGroup = svgEl('g', { 'clip-path': `url(#${clipId})` });
-      svg.appendChild(maskGroup);
+      flushPending(`url(#${clipId})`);
       continue;
     }
 
     if (options.strokeOnly) {
-      // Force stroke + no fill everywhere
       for (const e of elements) forceStroke(e);
     }
-    const target: SVGElement = maskGroup ?? svg;
-    for (const e of elements) target.appendChild(e);
+    pending.push(...elements);
   }
+  flushPending(null);
 
   return new XMLSerializer().serializeToString(svg);
 }
 
 function forceStroke(el: SVGElement): void {
-  if (!el.hasAttribute('stroke')) el.setAttribute('stroke', '#000');
+  const stroke = el.getAttribute('stroke');
+  if (!stroke || stroke === 'none') el.setAttribute('stroke', '#000');
+  if (!el.hasAttribute('stroke-width')) el.setAttribute('stroke-width', '0.1');
   el.setAttribute('fill', 'none');
-  // Recurse into children
   for (const child of Array.from(el.children) as SVGElement[]) forceStroke(child);
 }
