@@ -1,45 +1,72 @@
 import opentype from 'opentype.js';
-import { Project, TextParams } from '../state/project';
+import { Project, TextParams, BlendMode } from '../state/project';
 import { renderLayer } from '../patterns';
-import { svgEl } from '../utils/svg';
+import { svgEl, applyGrow } from '../utils/svg';
+import { getCustomFont } from '../state/font-registry';
 
-let cachedFont: opentype.Font | null = null;
-async function loadFont(): Promise<opentype.Font> {
-  if (cachedFont) return cachedFont;
+let cachedNoto: opentype.Font | null = null;
+async function loadNotoSans(): Promise<opentype.Font> {
+  if (cachedNoto) return cachedNoto;
   const buf = await fetch('/fonts/NotoSans-Regular.ttf').then((r) => {
     if (!r.ok) throw new Error('Could not load /fonts/NotoSans-Regular.ttf');
     return r.arrayBuffer();
   });
-  cachedFont = opentype.parse(buf);
-  return cachedFont;
+  cachedNoto = opentype.parse(buf);
+  return cachedNoto;
+}
+
+async function resolveFont(family: string): Promise<opentype.Font | null> {
+  const custom = getCustomFont(family);
+  if (custom) return custom;
+  if (family === 'Noto Sans') return loadNotoSans();
+  return null;
 }
 
 function textToPathElement(params: TextParams, font: opentype.Font): SVGElement {
-  // opentype uses font units → use getPath with the requested em size; SVG units = mm here.
   const tmp = font.getPath(params.content, 0, 0, params.sizeMm);
-  // Measure to support alignment
   const bbox = tmp.getBoundingBox();
+  const bboxW = bbox.x2 - bbox.x1;
   let dx = 0;
-  if (params.align === 'middle') dx = -(bbox.x2 - bbox.x1) / 2;
-  else if (params.align === 'end') dx = -(bbox.x2 - bbox.x1);
-  const p = font.getPath(params.content, dx, 0, params.sizeMm);
+  if (params.align === 'middle') dx = -bbox.x1 - bboxW / 2;
+  else if (params.align === 'start') dx = -bbox.x1;
+  else if (params.align === 'end') dx = -bbox.x1 - bboxW;
+  // Vertical: bbox vertical centre at y=0 — text lives at layer-local (0, 0).
+  const dy = -(bbox.y1 + bbox.y2) / 2;
+  const p = font.getPath(params.content, dx, dy, params.sizeMm);
   const d = p.toPathData(3);
+  let pivotX = 0;
+  if (params.align === 'start') pivotX = bboxW / 2;
+  else if (params.align === 'end') pivotX = -bboxW / 2;
   return svgEl('path', {
     d,
-    transform: `translate(${params.x} ${params.y}) rotate(${params.rotation})`,
+    transform: `rotate(${params.rotation} ${pivotX} 0)`,
     stroke: '#000',
     'stroke-width': params.strokeWidth,
     fill: 'none',
   });
 }
 
+function buildMaskDef(
+  id: string,
+  mode: Exclude<BlendMode, 'normal'>,
+  wrapper: SVGElement,
+  W: number,
+  H: number,
+): SVGElement {
+  const mask = svgEl('mask', { id, maskUnits: 'userSpaceOnUse', x: 0, y: 0, width: W, height: H });
+  const bg = mode === 'intersect' ? '#000' : '#fff';
+  const fg = mode === 'intersect' ? '#fff' : '#000';
+  mask.appendChild(svgEl('rect', { x: 0, y: 0, width: W, height: H, fill: bg }));
+  const cloned = wrapper.cloneNode(true) as SVGElement;
+  paintForMask(cloned, fg);
+  mask.appendChild(cloned);
+  return mask;
+}
+
 export async function exportLaserSvg(
   project: Project,
-  options: { strokeOnly: boolean; textToPath: boolean },
+  options: { strokeOnly: boolean },
 ): Promise<string> {
-  // Strategy: reuse renderLayer for non-text layers; for text layers, replace with text-to-path when requested.
-  const font = options.textToPath ? await loadFont() : null;
-
   const { width: W, height: H } = project.canvas;
   const svg = svgEl('svg', {
     xmlns: 'http://www.w3.org/2000/svg',
@@ -48,48 +75,63 @@ export async function exportLaserSvg(
     viewBox: `0 0 ${W} ${H}`,
   });
 
-  // A mask layer wraps the preceding contiguous block of normal layers in a clipPath
-  // built from its own geometry. Block resets at each mask boundary.
-  const pending: SVGElement[] = [];
-  const flushPending = (clipPath: string | null): void => {
-    if (pending.length === 0) return;
-    if (clipPath) {
-      const wrap = svgEl('g', { 'clip-path': clipPath });
-      for (const e of pending) wrap.appendChild(e);
-      svg.appendChild(wrap);
-    } else {
-      for (const e of pending) svg.appendChild(e);
-    }
-    pending.length = 0;
-  };
+  const defs = svgEl('defs');
+  const clipId = 'canvas-bounds';
+  const clip = svgEl('clipPath', { id: clipId });
+  clip.appendChild(svgEl('rect', { x: 0, y: 0, width: W, height: H }));
+  defs.appendChild(clip);
+  svg.appendChild(defs);
 
-  for (const layer of project.layers) {
+  const stack: SVGElement[] = [];
+
+  for (let i = 0; i < project.layers.length; i++) {
+    const layer = project.layers[i];
     if (!layer.visible) continue;
 
     let elements: SVGElement[];
-    if (layer.pattern.kind === 'text' && font) {
-      elements = [textToPathElement(layer.pattern.params, font)];
+    // Per-layer textToPath drives the vectorisation. Mask layers are never
+    // visible in the export, so skip the expensive opentype call for them.
+    const shouldVectoriseText =
+      layer.pattern.kind === 'text'
+      && (layer.pattern.params as TextParams).textToPath
+      && layer.blendMode === 'normal';
+    if (shouldVectoriseText) {
+      const font = await resolveFont((layer.pattern.params as TextParams).fontFamily);
+      if (font) {
+        elements = [textToPathElement(layer.pattern.params as TextParams, font)];
+      } else {
+        // Font unavailable in opentype — fall back to renderer's <text> element.
+        elements = renderLayer(layer, project.canvas);
+      }
     } else {
       elements = renderLayer(layer, project.canvas);
     }
 
-    if (layer.blendMode === 'mask') {
-      const clipId = `mask_${layer.id}`;
-      const defs = svgEl('defs');
-      const cp = svgEl('clipPath', { id: clipId });
-      for (const e of elements) cp.appendChild(e.cloneNode(true) as SVGElement);
-      defs.appendChild(cp);
-      svg.appendChild(defs);
-      flushPending(`url(#${clipId})`);
+    const wrapper = svgEl('g', { transform: `translate(${layer.offsetX} ${layer.offsetY})` });
+    for (const e of elements) wrapper.appendChild(e);
+    if (layer.grow > 0) applyGrow(wrapper, layer.grow);
+
+    if (layer.blendMode === 'normal') {
+      if (options.strokeOnly) forceStroke(wrapper);
+      stack.push(wrapper);
       continue;
     }
 
-    if (options.strokeOnly) {
-      for (const e of elements) forceStroke(e);
-    }
-    pending.push(...elements);
+    // intersect/exclude only acts on the immediate layer below — must be visible.
+    const below = project.layers[i - 1];
+    if (!below || !below.visible || below.blendMode !== 'normal') continue;
+    const target = stack[stack.length - 1];
+    if (!target) continue;
+    const maskId = `mask_${layer.id}`;
+    defs.appendChild(buildMaskDef(maskId, layer.blendMode, wrapper, W, H));
+    const wrapped = svgEl('g', { mask: `url(#${maskId})` });
+    wrapped.appendChild(target);
+    stack[stack.length - 1] = wrapped;
   }
-  flushPending(null);
+
+  const clipped = svgEl('g', { 'clip-path': `url(#${clipId})` });
+  for (const e of stack) clipped.appendChild(e);
+  svg.appendChild(clipped);
 
   return new XMLSerializer().serializeToString(svg);
 }
@@ -100,4 +142,11 @@ function forceStroke(el: SVGElement): void {
   if (!el.hasAttribute('stroke-width')) el.setAttribute('stroke-width', '0.1');
   el.setAttribute('fill', 'none');
   for (const child of Array.from(el.children) as SVGElement[]) forceStroke(child);
+}
+
+function paintForMask(el: SVGElement, colour: string): void {
+  if (el.hasAttribute('stroke') && el.getAttribute('stroke') !== 'none') el.setAttribute('stroke', colour);
+  if (el.hasAttribute('fill') && el.getAttribute('fill') !== 'none') el.setAttribute('fill', colour);
+  if (!el.hasAttribute('stroke')) el.setAttribute('stroke', colour);
+  for (const child of Array.from(el.children) as SVGElement[]) paintForMask(child, colour);
 }

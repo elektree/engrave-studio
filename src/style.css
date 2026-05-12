@@ -1,16 +1,672 @@
+@font-face {
+  font-family: 'Noto Sans';
+  font-weight: 400;
+  font-style: normal;
+  src: url('/fonts/NotoSans-Regular.ttf') format('truetype');
+  font-display: swap;
+}
+
+:root {
+  --bg: #f4f2ee;
+  --panel: #ffffff;
+  --panel-muted: #fafaf7;
+  --border: #e4e1db;
+  --border-strong: #cdc8bf;
+  --text: #1d1b18;
+  --text-muted: #6a665f;
+  --accent: #c2410c;
+  --accent-hover: #9a3412;
+  --accent-soft: #fde8d4;
+  --shadow-sm: 0 1px 2px rgba(20, 18, 14, 0.04);
+  --shadow-md: 0 4px 12px rgba(20, 18, 14, 0.06);
+  --radius: 6px;
+  --radius-sm: 4px;
+}
+
 * { box-sizing: border-box; }
-html, body, #app { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
 #app { display: flex; flex-direction: column; }
-.app-header { height: 48px; border-bottom: 1px solid #ddd; padding: 0 12px; display: flex; align-items: center; gap: 12px; }
-.app-main { flex: 1; display: grid; grid-template-columns: 240px 1fr 280px; min-height: 0; }
-.layers, .props { border: 1px solid #ddd; overflow: auto; padding: 8px; background: #fafafa; }
-.canvas { background: #f4f4f4; overflow: hidden; position: relative; }
-.preview-viewport { width: 100%; height: 100%; overflow: hidden; cursor: grab; }
-.preview-viewport:active { cursor: grabbing; }
-.preview-wrap { width: 100%; height: 100%; transform-origin: 0 0; }
-.preview-wrap svg { width: 100%; height: 100%; }
-button { font: inherit; padding: 4px 8px; cursor: pointer; }
-input[type="number"], input[type="text"], select { font: inherit; padding: 2px 4px; }
-label { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-size: 13px; }
-label > span { flex: 1; }
-label > input, label > select { width: 110px; }
+
+/* ── Header ─────────────────────────────────────────────────── */
+
+.app-header {
+  height: 52px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  flex-shrink: 0;
+}
+
+.header-title {
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.header-name {
+  width: 200px;
+}
+
+.header-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.header-spacer { flex: 1; }
+
+.header-separator {
+  width: 1px;
+  height: 24px;
+  background: var(--border);
+  margin: 0 2px;
+}
+
+/* ── Main layout ────────────────────────────────────────────── */
+
+.app-main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 260px 1fr 300px;
+  min-height: 0;
+  gap: 0;
+}
+
+.layers, .props {
+  background: var(--panel);
+  overflow: auto;
+  padding: 14px;
+  border-right: 1px solid var(--border);
+}
+
+.props {
+  border-right: none;
+  border-left: 1px solid var(--border);
+}
+
+.canvas {
+  background:
+    linear-gradient(45deg, #ece9e3 25%, transparent 25%),
+    linear-gradient(-45deg, #ece9e3 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #ece9e3 75%),
+    linear-gradient(-45deg, transparent 75%, #ece9e3 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-color: var(--bg);
+  overflow: hidden;
+  position: relative;
+}
+
+/* ── Buttons ────────────────────────────────────────────────── */
+
+button {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 10px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  line-height: 1;
+}
+
+button:hover {
+  background: var(--panel-muted);
+  border-color: var(--text-muted);
+}
+
+button:active { transform: translateY(1px); }
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button.primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+  padding: 4px 6px;
+}
+
+button.ghost:hover {
+  background: var(--panel-muted);
+  color: var(--text);
+}
+
+button.icon {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Inputs ─────────────────────────────────────────────────── */
+
+input[type="text"],
+input[type="number"],
+select {
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 8px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+/* Hide number-input spinner arrows (Chrome/Safari + Firefox) — the drag-edit
+   label + typing handle increments more directly and gives more horizontal room. */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+input[type="text"]:focus,
+input[type="number"]:focus,
+select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+input[type="checkbox"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+select {
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M3 4.5L6 7.5L9 4.5' stroke='%236a665f' stroke-width='1.5' fill='none'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  padding-right: 22px;
+}
+
+label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ── Layers panel ──────────────────────────────────────────── */
+
+.layers-panel-title,
+.props-title {
+  margin: 0 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.layers-add {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.layers-add select { flex: 1; }
+
+.add-menu-trigger {
+  width: 100%;
+  text-align: left;
+}
+
+/* Floating menu shown when clicking the +Ajouter button. */
+.add-layer-popup {
+  position: fixed;
+  z-index: 100;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  padding: 4px;
+  min-width: 160px;
+}
+.add-layer-popup-item {
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text);
+}
+.add-layer-popup-item:hover {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+}
+
+.layers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.layer-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  background: var(--panel-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.layer-row:hover {
+  border-color: var(--border-strong);
+}
+
+.layer-row.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.layer-row .layer-name {
+  flex: 1 1 0;
+  min-width: 0;
+  width: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 3px 5px;
+}
+
+.layer-row .layer-name:hover {
+  border-color: var(--border-strong);
+  background: var(--panel);
+}
+
+.layer-row .layer-name:focus {
+  background: var(--panel);
+}
+
+.layer-row .blend-btn {
+  flex-shrink: 0;
+}
+
+.layer-row .blend-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+}
+
+.layer-row > button.icon { flex-shrink: 0; width: 22px; height: 22px; font-size: 11px; }
+.layer-row > input[type="checkbox"] { flex-shrink: 0; }
+
+.layer-handle {
+  flex-shrink: 0;
+  cursor: grab;
+  color: var(--text-muted);
+  font-size: 12px;
+  letter-spacing: -2px;
+  user-select: none;
+  padding: 0 2px;
+}
+.layer-handle:active { cursor: grabbing; }
+
+.layer-row.dragging { opacity: 0.4; }
+.layer-row.drop-above { box-shadow: inset 0 2px 0 var(--accent); }
+.layer-row.drop-below { box-shadow: inset 0 -2px 0 var(--accent); }
+
+/* ── Rich select ──────────────────────────────────────────── */
+
+.rich-select {
+  position: relative;
+  width: 100%;
+}
+
+.rich-select-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 3px 6px;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  min-height: 26px;
+}
+
+.rich-select-button:hover { border-color: var(--text-muted); }
+.rich-select-button:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.rich-select-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  display: inline-flex;
+  align-items: center;
+}
+
+.rich-select-caret {
+  color: var(--text-muted);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.rich-select-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 50;
+  min-width: 200px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  padding: 4px;
+}
+
+.rich-select-panel.hidden { display: none; }
+
+.rich-select-item {
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+.rich-select-item:hover { background: var(--panel-muted); }
+.rich-select-item.selected { background: var(--accent-soft); color: var(--accent-hover); }
+
+.font-option {
+  display: inline-block;
+  white-space: nowrap;
+  font-size: 14px;
+}
+
+.shape-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.shape-option svg { display: block; }
+.shape-option-label { color: var(--text-muted); font-size: 12px; }
+
+/* ── Props field with secondary upload action ──────────────── */
+
+.props-control-with-action {
+  flex: 0 0 160px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.props-control-with-action .rich-select { flex: 1; min-width: 0; }
+.props-control-with-action button.icon { width: 24px; height: 24px; flex-shrink: 0; }
+
+.props-field > .rich-select { width: 140px; }
+
+/* Slider field — range + numeric readout side by side. */
+.props-slider {
+  flex: 0 0 140px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.props-slider-range { flex: 1; min-width: 0; accent-color: var(--accent); }
+.props-slider-number { width: 52px; }
+
+/* Modulation toggle + min/max sub-controls — single row. */
+.props-modulated {
+  flex: 0 0 180px;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 3px;
+}
+.props-modulated .mod-sub-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  padding: 0 1px;
+}
+.props-modulated .props-mod-number {
+  flex: 1 1 0;
+  min-width: 0;
+  width: 38px;
+  padding: 5px 4px;
+}
+.mod-toggle.active {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  font-weight: 700;
+}
+
+/* Gradient detail block (angle/t0/t1 sliders shown when gradient enabled). */
+.gradient-detail {
+  margin-top: 4px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+
+/* Drop target overlay when dragging a file over the canvas. */
+.preview-viewport.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -8px;
+}
+
+/* Inline text editing overlay — positioned exactly over the SVG text via the
+   text element's screen CTM so it also rotates with the text. The :focus
+   selector beats the generic `input[type=text]:focus` rule that would
+   otherwise paint an orange focus ring on top of our invisible input. */
+.text-edit-overlay,
+.text-edit-overlay:focus,
+.text-edit-overlay:focus-visible {
+  position: fixed;
+  z-index: 200;
+  background: transparent !important;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  margin: 0;
+  color: var(--text);
+  caret-color: var(--accent);
+  overflow: hidden;
+}
+
+/* Rotation dial — drag the tick to set the angle. */
+.rotation-dial {
+  flex: 0 0 140px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.rotation-dial svg {
+  cursor: grab;
+  user-select: none;
+}
+.rotation-dial svg:active { cursor: grabbing; }
+.rotation-dial-readout {
+  flex: 1;
+  min-width: 0;
+}
+
+/* SVG layer thumbnail in the props panel — clickable to swap the source file. */
+.svg-thumb {
+  width: 80px;
+  height: 60px;
+  padding: 4px;
+  background: var(--panel-muted);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.svg-thumb:hover { border-color: var(--accent); background: var(--panel); }
+.svg-thumb svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  /* Some user SVGs come stroke-only — make sure strokes are visible against the bg */
+  color: var(--text);
+}
+
+/* Multi-select layer ids (used for maze obstacles). */
+.props-section-block {
+  margin: 8px 0;
+}
+.props-section-subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.layer-ids-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--panel-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+.layer-ids-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 2px 0;
+}
+.layer-ids-row input[type="checkbox"] { flex-shrink: 0; }
+.layer-ids-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 4px 0;
+}
+
+/* ── Props panel ───────────────────────────────────────────── */
+
+.props-section {
+  margin-bottom: 14px;
+}
+
+.props-section-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.props-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 5px 0;
+}
+
+.props-field > span {
+  flex: 1;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* Numeric labels gain drag-to-edit: cursor hint + dotted underline so the user
+   realises they can scrub the value or double-click to reset. */
+.drag-edit-label {
+  cursor: ew-resize;
+  user-select: none;
+  -webkit-user-select: none;
+  border-bottom: 1px dotted var(--border-strong);
+  touch-action: none; /* allow pointer-capture drags on touch devices too */
+}
+.drag-edit-label:hover { color: var(--text); }
+.drag-edit-active { color: var(--accent) !important; border-bottom-color: var(--accent) !important; }
+
+.props-field > input,
+.props-field > select {
+  width: 120px;
+}
+
+.props-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 12px;
+  padding: 8px 0;
+}
+
+/* ── Canvas viewport / drag affordances ────────────────────── */
+
+.preview-viewport {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  cursor: default;
+}
+
+.preview-viewport.panning { cursor: grabbing; }
+.preview-viewport.dragging-layer { cursor: grabbing; }
+.preview-viewport.resizing-zone { /* cursor set inline based on edge */ }
+
+.preview-wrap {
+  width: 100%;
+  height: 100%;
+  /* Pan/zoom is applied via a <g transform> inside the SVG so vector content
+     stays crisp at any zoom level. */
+}
+
+.preview-wrap svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Mask layers don't ship in the laser export, but we need to render them in the
+   preview so the user can see what they're moving. Only show when the layer is
+   selected — otherwise they'd be noise. */
+.preview-wrap svg .mask-guide { opacity: 0; }
+.preview-wrap svg .mask-guide[data-selected="true"] { opacity: 0.25; }

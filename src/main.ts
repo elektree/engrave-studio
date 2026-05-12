@@ -6,13 +6,14 @@ import { mountLayersPanel } from './ui/layers-panel';
 import { mountPropsPanel } from './ui/props-panel';
 import { mountHeader } from './ui/header';
 import { defaultPatternForKind } from './patterns';
+import { tr } from './i18n';
 
 const store = new Store(loadProject());
 attachAutosave(store);
 
 if (store.get().layers.length === 0) {
   store.update((p) => {
-    const l = makeLayer(defaultPatternForKind('geometric'), 'Geometric 1');
+    const l = makeLayer(defaultPatternForKind('geometric'), `${tr('geometric')} 1`);
     p.layers = [l];
     p.selectedLayerId = l.id;
   });

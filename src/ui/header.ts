@@ -3,88 +3,120 @@ import { exportProjectJson, importProjectJson } from '../state/persistence';
 import { exportLaserSvg } from '../render/export';
 
 export function mountHeader(container: HTMLElement, store: Store): void {
-  const render = () => {
-    const project = store.get();
-    container.innerHTML = '';
+  // Build once — header is small and its structure doesn't depend on store updates.
+  container.innerHTML = '';
 
-    const name = document.createElement('input');
-    name.type = 'text'; name.value = project.name; name.style.width = '180px';
-    name.oninput = () => store.update((p) => { p.name = name.value; });
-    container.appendChild(name);
+  const title = document.createElement('div');
+  title.className = 'header-title';
+  title.textContent = 'Engrave';
+  container.appendChild(title);
 
-    const wInput = numberInput(project.canvas.width, 1, (v) => store.update((p) => { p.canvas = { ...p.canvas, width: v }; }));
-    const hInput = numberInput(project.canvas.height, 0.5, (v) => store.update((p) => { p.canvas = { ...p.canvas, height: v }; }));
-    container.appendChild(label('W (mm)', wInput));
-    container.appendChild(label('H (mm)', hInput));
+  const nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.className = 'header-name';
+  nameInput.value = store.get().name;
+  nameInput.placeholder = 'Nom du projet';
+  nameInput.oninput = () => store.update((p) => { p.name = nameInput.value; });
+  container.appendChild(nameInput);
 
-    const spacer = document.createElement('div'); spacer.style.flex = '1';
-    container.appendChild(spacer);
+  container.appendChild(separator());
 
-    const strokeOnly = document.createElement('input');
-    strokeOnly.type = 'checkbox'; strokeOnly.checked = true;
-    container.appendChild(label('stroke only', strokeOnly));
+  const wInput = numberInput(store.get().canvas.width, 1, (v) =>
+    store.update((p) => { p.canvas = { ...p.canvas, width: v }; }));
+  const hInput = numberInput(store.get().canvas.height, 0.5, (v) =>
+    store.update((p) => { p.canvas = { ...p.canvas, height: v }; }));
+  container.appendChild(field('W', wInput));
+  container.appendChild(field('H', hInput));
 
-    const textToPath = document.createElement('input');
-    textToPath.type = 'checkbox'; textToPath.checked = true;
-    container.appendChild(label('text→path', textToPath));
+  const spacer = document.createElement('div');
+  spacer.className = 'header-spacer';
+  container.appendChild(spacer);
 
-    const exportBtn = document.createElement('button');
-    exportBtn.textContent = 'Export SVG';
-    exportBtn.onclick = async () => {
-      try {
-        const svg = await exportLaserSvg(store.get(), {
-          strokeOnly: strokeOnly.checked,
-          textToPath: textToPath.checked,
-        });
-        const blob = new Blob([svg], { type: 'image/svg+xml' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${(store.get().name || 'belt').replace(/\s+/g, '_')}.svg`;
-        a.click();
-        URL.revokeObjectURL(url);
-      } catch (err) {
-        alert((err as Error).message);
-      }
+  const strokeOnly = document.createElement('input');
+  strokeOnly.type = 'checkbox'; strokeOnly.checked = true;
+  container.appendChild(field('traits seuls', strokeOnly));
+
+  container.appendChild(separator());
+
+  const jsonOut = document.createElement('button');
+  jsonOut.className = 'ghost icon';
+  jsonOut.textContent = '💾';
+  jsonOut.title = 'Enregistrer le projet (JSON)';
+  jsonOut.onclick = () => exportProjectJson(store.get());
+  container.appendChild(jsonOut);
+
+  const jsonIn = document.createElement('button');
+  jsonIn.className = 'ghost icon';
+  jsonIn.textContent = '📂';
+  jsonIn.title = 'Ouvrir un projet (JSON)';
+  jsonIn.onclick = () => {
+    const f = document.createElement('input');
+    f.type = 'file'; f.accept = 'application/json';
+    f.onchange = async () => {
+      const file = f.files?.[0]; if (!file) return;
+      try { await importProjectJson(file, store); } catch (e) { alert((e as Error).message); }
     };
-    container.appendChild(exportBtn);
-
-    const jsonOut = document.createElement('button');
-    jsonOut.textContent = '↓ JSON';
-    jsonOut.onclick = () => exportProjectJson(store.get());
-    container.appendChild(jsonOut);
-
-    const jsonIn = document.createElement('button');
-    jsonIn.textContent = '↑ JSON';
-    jsonIn.onclick = () => {
-      const f = document.createElement('input');
-      f.type = 'file'; f.accept = 'application/json';
-      f.onchange = async () => {
-        const file = f.files?.[0]; if (!file) return;
-        try { await importProjectJson(file, store); } catch (e) { alert((e as Error).message); }
-      };
-      f.click();
-    };
-    container.appendChild(jsonIn);
+    f.click();
   };
+  container.appendChild(jsonIn);
 
-  function numberInput(value: number, step: number, onChange: (v: number) => void): HTMLInputElement {
-    const i = document.createElement('input');
-    i.type = 'number'; i.value = String(value); i.step = String(step); i.min = '1'; i.style.width = '80px';
-    i.oninput = () => {
-      const v = Number(i.value);
-      if (!Number.isFinite(v) || v < 1) return;
-      onChange(v);
-    };
-    return i;
-  }
-  function label(text: string, input: HTMLElement): HTMLElement {
-    const l = document.createElement('label'); l.style.gap = '4px';
-    const s = document.createElement('span'); s.textContent = text;
-    l.appendChild(s); l.appendChild(input);
-    return l;
-  }
+  const exportBtn = document.createElement('button');
+  exportBtn.className = 'primary';
+  exportBtn.textContent = 'Exporter SVG';
+  exportBtn.onclick = async () => {
+    try {
+      const svg = await exportLaserSvg(store.get(), {
+        strokeOnly: strokeOnly.checked,
+      });
+      const blob = new Blob([svg], { type: 'image/svg+xml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${(store.get().name || 'belt').replace(/\s+/g, '_')}.svg`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert((err as Error).message);
+    }
+  };
+  container.appendChild(exportBtn);
 
-  store.subscribe(render);
-  render();
+  // Keep the small inputs in sync if the project is reloaded via JSON import.
+  store.subscribe(() => {
+    const p = store.get();
+    if (document.activeElement !== nameInput && nameInput.value !== p.name) nameInput.value = p.name;
+    if (document.activeElement !== wInput && Number(wInput.value) !== p.canvas.width) wInput.value = String(p.canvas.width);
+    if (document.activeElement !== hInput && Number(hInput.value) !== p.canvas.height) hInput.value = String(p.canvas.height);
+  });
+}
+
+function numberInput(value: number, step: number, onChange: (v: number) => void): HTMLInputElement {
+  const i = document.createElement('input');
+  i.type = 'number';
+  i.value = String(value);
+  i.step = String(step);
+  i.min = '1';
+  i.style.width = '70px';
+  i.oninput = () => {
+    const v = Number(i.value);
+    if (!Number.isFinite(v) || v < 1) return;
+    onChange(v);
+  };
+  return i;
+}
+
+function field(text: string, input: HTMLElement): HTMLElement {
+  const wrap = document.createElement('label');
+  wrap.className = 'header-group';
+  const s = document.createElement('span');
+  s.textContent = text;
+  wrap.appendChild(s);
+  wrap.appendChild(input);
+  return wrap;
+}
+
+function separator(): HTMLElement {
+  const s = document.createElement('div');
+  s.className = 'header-separator';
+  return s;
 }
