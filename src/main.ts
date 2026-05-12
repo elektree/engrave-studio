@@ -4,6 +4,7 @@ import { loadProject, attachAutosave } from './state/persistence';
 import { mountCanvasPanel } from './ui/canvas-panel';
 import { mountLayersPanel } from './ui/layers-panel';
 import { mountPropsPanel } from './ui/props-panel';
+import { mountHeader } from './ui/header';
 import { defaultPatternForKind } from './patterns';
 
 const store = new Store(loadProject());
@@ -27,6 +28,7 @@ app.innerHTML = `
   </main>
 `;
 
+mountHeader(app.querySelector('.app-header') as HTMLElement, store);
 mountCanvasPanel(app.querySelector('.canvas') as HTMLElement, store);
 mountLayersPanel(app.querySelector('.layers') as HTMLElement, store);
 mountPropsPanel(app.querySelector('.props') as HTMLElement, store);
