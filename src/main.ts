@@ -2,6 +2,7 @@ import './style.css';
 import { Store, defaultProject, makeLayer } from './state/project';
 import { mountCanvasPanel } from './ui/canvas-panel';
 import { mountLayersPanel } from './ui/layers-panel';
+import { mountPropsPanel } from './ui/props-panel';
 import { defaultPatternForKind } from './patterns';
 
 const store = new Store(defaultProject());
@@ -25,3 +26,4 @@ app.innerHTML = `
 
 mountCanvasPanel(app.querySelector('.canvas') as HTMLElement, store);
 mountLayersPanel(app.querySelector('.layers') as HTMLElement, store);
+mountPropsPanel(app.querySelector('.props') as HTMLElement, store);
