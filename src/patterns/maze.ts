@@ -1,6 +1,7 @@
-import { MazeParams, MazeStyle, Canvas, Layer } from '../state/project';
+import { MazeParams, MazeStyle, Project, Layer, Canvas } from '../state/project';
 import { svgEl } from '../utils/svg';
 import { makeParamResolver } from './gradient';
+import { colorForDepth } from '../utils/palette';
 
 function vertHash(gx: number, gy: number, seed: number, channel: number): number {
   let h = (seed + 0x9E3779B9) >>> 0;
@@ -68,13 +69,14 @@ function mulberry32(seed: number): () => number {
 
 type Cell = { walls: [boolean, boolean, boolean, boolean]; visited: boolean }; // N, E, S, W
 
-export function renderMaze(params: MazeParams, canvas: Canvas, layer?: Layer): SVGElement[] {
-  if (params.cellShape === 'hex') return renderMazeHex(params, canvas, layer);
-  return renderMazeSquare(params, canvas, layer);
+export function renderMaze(params: MazeParams, project: Project, layer: Layer): SVGElement[] {
+  if (params.cellShape === 'hex') return renderMazeHex(params, project, layer);
+  return renderMazeSquare(params, project, layer);
 }
 
-function renderMazeSquare(params: MazeParams, canvas: Canvas, layer?: Layer): SVGElement[] {
-  const { width: CW, height: CH } = canvas;
+function renderMazeSquare(params: MazeParams, project: Project, layer: Layer): SVGElement[] {
+  const { width: CW, height: CH } = project.canvas;
+  const color = colorForDepth(layer.depth, project.palette);
   const zoneW = params.zoneWidth > 0 ? params.zoneWidth : CW;
   const zoneH = params.zoneHeight > 0 ? params.zoneHeight : CH;
   const cell = Math.max(params.cellSize, 0.5);
@@ -230,11 +232,11 @@ function renderMazeSquare(params: MazeParams, canvas: Canvas, layer?: Layer): SV
   // ─ Render each polyline as a Catmull-Rom blended cubic bezier ─
   const out = svgEl('g');
   const cap: MazeStyle = params.style;
-  out.setAttribute('stroke', '#000');
+  out.setAttribute('stroke', color);
   out.setAttribute('fill', 'none');
   out.setAttribute('stroke-linecap', cap === 'rounded' ? 'round' : 'square');
   out.setAttribute('stroke-linejoin', cap === 'rounded' ? 'round' : 'miter');
-  const hasStrokeMod = !!(layer?.gradient.enabled && layer.mods.strokeWidth);
+  const hasStrokeMod = !!(layer.gradient.enabled && layer.mods.strokeWidth);
   // When no per-wall stroke modulation, set once on the parent so children inherit.
   if (!hasStrokeMod) out.setAttribute('stroke-width', String(params.strokeWidth));
 
@@ -332,8 +334,9 @@ function renderMazeSquare(params: MazeParams, canvas: Canvas, layer?: Layer): SV
 }
 
 // Pointy-top hex grid in odd-r offset coordinates.
-function renderMazeHex(params: MazeParams, canvas: Canvas, layer?: Layer): SVGElement[] {
-  const { width: CW, height: CH } = canvas;
+function renderMazeHex(params: MazeParams, project: Project, layer: Layer): SVGElement[] {
+  const { width: CW, height: CH } = project.canvas;
+  const color = colorForDepth(layer.depth, project.palette);
   const zoneW = params.zoneWidth > 0 ? params.zoneWidth : CW;
   const zoneH = params.zoneHeight > 0 ? params.zoneHeight : CH;
   const R = Math.max(0.25, params.cellSize / 2);
@@ -491,11 +494,11 @@ function renderMazeHex(params: MazeParams, canvas: Canvas, layer?: Layer): SVGEl
   }
 
   const out = svgEl('g');
-  out.setAttribute('stroke', '#000');
+  out.setAttribute('stroke', color);
   out.setAttribute('fill', 'none');
   out.setAttribute('stroke-linecap', params.style === 'rounded' ? 'round' : 'square');
   out.setAttribute('stroke-linejoin', params.style === 'rounded' ? 'round' : 'miter');
-  const hasStrokeMod = !!(layer?.gradient.enabled && layer.mods.strokeWidth);
+  const hasStrokeMod = !!(layer.gradient.enabled && layer.mods.strokeWidth);
   if (!hasStrokeMod) out.setAttribute('stroke-width', String(params.strokeWidth));
 
   const iters = Math.max(0, Math.round(params.vertexSmooth));
@@ -597,10 +600,10 @@ function renderSmoothedPolyline(
   return [svgEl('path', attrs)];
 }
 
-export function defaultMazeParams(canvas?: Canvas): MazeParams {
+export function defaultMazeParams(canvas?: Canvas, kerf = 0.12): MazeParams {
   return {
     cellSize: 4,
-    strokeWidth: 0.3,
+    strokeWidth: kerf,
     style: 'square',
     cellShape: 'square',
     organicAmount: 0,

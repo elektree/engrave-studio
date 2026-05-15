@@ -1,11 +1,14 @@
-import { FriezeParams, Canvas, Layer } from '../state/project';
+import { FriezeParams, Project, Layer } from '../state/project';
 import { path } from '../utils/svg';
 import { makeParamResolver } from './gradient';
+import { colorForDepth } from '../utils/palette';
 
-export function renderFrieze(params: FriezeParams, canvas: Canvas, layer?: Layer): SVGElement[] {
-  const { width: W, height: H } = canvas;
+export function renderFrieze(params: FriezeParams, project: Project, layer: Layer): SVGElement[] {
+  const { width: W, height: H } = project.canvas;
   const { variant, period: P, amplitude: A, strokeWidth, offsetX, mirror, mirrorOffsetY } = params;
   const out: SVGElement[] = [];
+  const palette = project.palette;
+  const color = colorForDepth(layer.depth, palette);
   const resolve = makeParamResolver(layer, W, H);
   const ampAt = (xq: number, yq: number) => Math.max(0, resolve('amplitude', A, xq, yq));
   const periodAt = (xq: number, yq: number) => Math.max(0.5, resolve('period', P, xq, yq));
@@ -18,7 +21,9 @@ export function renderFrieze(params: FriezeParams, canvas: Canvas, layer?: Layer
     let d = '';
     switch (variant) {
       case 'wave': {
-        const sampleStep = 0.5;
+        // ~50 samples per period keeps the sine smooth at any scale — fixed
+        // 0.5mm sampling would alias wildly once the period drops below ~2mm.
+        const sampleStep = Math.max(0.05, P / 50);
         const samples = Math.max(2, Math.ceil(W / sampleStep) + 1);
         for (let i = 0; i < samples; i++) {
           const x = (i / (samples - 1)) * W;
@@ -29,7 +34,7 @@ export function renderFrieze(params: FriezeParams, canvas: Canvas, layer?: Layer
         break;
       }
       case 'braid': {
-        const sampleStep = 0.5;
+        const sampleStep = Math.max(0.05, P / 50);
         const samples = Math.max(2, Math.ceil(W / sampleStep) + 1);
         for (let i = 0; i < samples; i++) {
           const x = (i / (samples - 1)) * W;
@@ -46,7 +51,7 @@ export function renderFrieze(params: FriezeParams, canvas: Canvas, layer?: Layer
           const yv = ycResolver(x) + Math.cos(((x - offsetX) / ph) * Math.PI * 2) * a * sign;
           d2.push(i === 0 ? `M ${x} ${yv}` : `L ${x} ${yv}`);
         }
-        out.push(path(d2.join(' '), strokeWidth));
+        out.push(path(d2.join(' '), strokeWidth, color));
         break;
       }
       case 'greek': {
@@ -95,7 +100,7 @@ export function renderFrieze(params: FriezeParams, canvas: Canvas, layer?: Layer
         break;
       }
     }
-    return path(d, strokeWidth);
+    return path(d, strokeWidth, color);
   };
   void H;
 

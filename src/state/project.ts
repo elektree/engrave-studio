@@ -1,8 +1,22 @@
 import { uid } from '../utils/id';
+import type { MaterialId } from '../render/materials';
 
 export type Unit = 'mm';
 
 export type Canvas = { width: number; height: number; unit: Unit };
+
+export type PaletteEntry = {
+  id: string;
+  name: string;
+  color: string;   // hex, e.g. "#404040"
+  value: number;   // [0, 1]
+  // 'fill' → strokes are converted to closed filled shapes at export. LightBurn
+  // user assigns a Fill (scan) operation to the colour layer. Default for
+  // engraving depths.
+  // 'line' → strokes are kept as single-pass centerlines at kerf width.
+  // LightBurn user assigns a Line operation. Default for the cut depth.
+  mode: 'fill' | 'line';
+};
 
 export type GeometricVariant = 'lines' | 'grid' | 'chevrons' | 'lattice' | 'dots';
 export type GeometricParams = {
@@ -31,8 +45,18 @@ export type ScatterShape = 'star' | 'flower' | 'rune' | 'circle' | 'custom';
 export type ScatterParams = {
   shape: ScatterShape;
   customSvg: string;       // raw SVG markup; used when shape === 'custom'
-  customForceStroke: boolean; // override custom SVG colours with black stroke / no fill
-  density: number;         // approx items per 100 mm
+  // Same semantic as text/shape: true = stroked outlines at strokeWidth,
+  // false = filled silhouettes. Applies to built-in shapes too.
+  outlined: boolean;
+  // Hard minimum distance between any two instances (mm) — drives the Poisson
+  // disk spacing constraint.
+  minDistance: number;
+  // Peak target count (items per 100 mm of zone width). The actual count is
+  // `density × densityFactor × zoneWidth / 100`.
+  density: number;
+  // [0, 1] multiplier applied on top of `density`. Lets the user thin out a
+  // scatter without touching the spacing constraint.
+  densityFactor: number;
   minSize: number;         // mm
   maxSize: number;         // mm
   rotationJitter: number;  // degrees
@@ -75,23 +99,40 @@ export type MazeParams = {
   zoneHeight: number;      // mm
 };
 
-export type ShapeKind = 'rect' | 'ellipse';
+export type ShapeKind = 'rect' | 'ellipse' | 'star' | 'polygon';
 export type ShapeParams = {
   shape: ShapeKind;
-  width: number;          // mm
-  height: number;         // mm
+  width: number;          // mm — outer bbox width
+  height: number;         // mm — outer bbox height
   rotation: number;       // degrees
   cornerRadius: number;   // mm (rect only)
-  strokeWidth: number;    // mm; 0 = filled
-  fill: boolean;          // true = solid fill (useful for masking), false = stroke only
+  strokeWidth: number;    // mm; used when `outlined` is true
+  // When true the shape is rendered as a stroked outline at strokeWidth (and
+  // exported as such — LightBurn user assigns Line). When false (default)
+  // the shape is rendered as a filled silhouette (LightBurn user assigns
+  // Fill). Same semantic as text's `textToPath` flag.
+  outlined: boolean;
+  branches: number;       // star only — number of points
+  sides: number;          // polygon only — number of vertices
 };
 
 export type SvgLayerParams = {
   svgText: string;        // raw SVG markup
   scale: number;          // uniform scale factor — preserves aspect ratio
   rotation: number;       // degrees
-  strokeWidth: number;    // mm (used when forceStroke is true)
-  forceStroke: boolean;   // force black stroke, no fill (laser-friendly)
+  strokeWidth: number;    // mm (used when outlined=true, or for source strokes)
+  // outlined=true → force every imported element to be drawn as a stroke at
+  // strokeWidth (source fills become outlines of their silhouette).
+  // outlined=false → preserve the source's paint role (filled stays filled,
+  // stroked stays stroked); the laser materialise pass later turns strokes
+  // into ribbons so the engraved output is uniformly shape-like.
+  outlined: boolean;
+  // Source colour mapping. Each imported element's effective colour (its
+  // stroke if any, else its fill, gradients averaged to a flat hex) is
+  // converted to a luminance value and remapped into the [depthForBlack,
+  // depthForWhite] depth range, then snapped to the project palette.
+  depthForBlack: number;  // [0, 1]; default 1
+  depthForWhite: number;  // [0, 1]; default 0
   tile: boolean;          // true = repeat across the canvas as a texture
   tileSpacingX: number;   // mm — extra horizontal gap between repeats
   tileSpacingY: number;   // mm — extra vertical gap between repeats
@@ -138,26 +179,45 @@ export type Layer = {
   offsetX: number;       // mm — shifts whole rendered layer horizontally
   offsetY: number;       // mm — shifts whole rendered layer vertically
   grow: number;          // mm — inflates every stroke-width in the layer
+  depth: number;         // [0, 1]; snaps to palette at render time
   gradient: LayerGradient;
   mods: Record<string, ParamMod>;
   pattern: Pattern;
 };
 
 export type Project = {
-  version: 1;
+  version: 2;
   name: string;
   canvas: Canvas;
-  layers: Layer[];          // index 0 = bottom
+  layers: Layer[];                    // index 0 = bottom
   selectedLayerId: string | null;
+  kerf: number;                       // mm — laser beam width
+  palette: PaletteEntry[];            // ≥1 entry, ordered by value
+  // When set, canvas switches to a chrome-free "final result" preview using
+  // the named material's burn-colour ramp. Undefined = standard edit mode.
+  previewMaterial?: MaterialId;
+  showRuler?: boolean;                // UI-only: mm ruler overlay (default on)
 };
+
+export function defaultPalette(): PaletteEntry[] {
+  return [
+    { id: 'depth-effleurage', name: 'effleurage', color: '#E0E0E0', value: 0.0,  mode: 'fill' },
+    { id: 'depth-leger',      name: 'léger',      color: '#A0A0A0', value: 0.25, mode: 'fill' },
+    { id: 'depth-moyen',      name: 'moyen',      color: '#606060', value: 0.5,  mode: 'fill' },
+    { id: 'depth-profond',    name: 'profond',    color: '#303030', value: 0.75, mode: 'fill' },
+    { id: 'depth-decoupe',    name: 'découpe',    color: '#000000', value: 1.0,  mode: 'line' },
+  ];
+}
 
 export function defaultProject(): Project {
   return {
-    version: 1,
+    version: 2,
     name: 'Ceinture sans titre',
     canvas: { width: 1100, height: 35, unit: 'mm' },
     layers: [],
     selectedLayerId: null,
+    kerf: 0.12,
+    palette: defaultPalette(),
   };
 }
 
@@ -170,6 +230,7 @@ export function makeLayer(pattern: Pattern, name: string): Layer {
     offsetX: 0,
     offsetY: 0,
     grow: 0,
+    depth: 0.5,
     gradient: { enabled: true, angle: 0, t0: 0, t1: 1 },
     mods: {},
     pattern,

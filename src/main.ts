@@ -1,23 +1,18 @@
 import './style.css';
-import { Store, makeLayer } from './state/project';
+import { Store } from './state/project';
 import { loadProject, attachAutosave } from './state/persistence';
+import { loadStoredFonts } from './state/font-registry';
 import { mountCanvasPanel } from './ui/canvas-panel';
 import { mountLayersPanel } from './ui/layers-panel';
 import { mountPropsPanel } from './ui/props-panel';
 import { mountHeader } from './ui/header';
-import { defaultPatternForKind } from './patterns';
-import { tr } from './i18n';
 
 const store = new Store(loadProject());
 attachAutosave(store);
-
-if (store.get().layers.length === 0) {
-  store.update((p) => {
-    const l = makeLayer(defaultPatternForKind('geometric'), `${tr('geometric')} 1`);
-    p.layers = [l];
-    p.selectedLayerId = l.id;
-  });
-}
+// Restore previously-uploaded custom fonts. Fire-and-forget: the FontFace
+// registrations don't gate first paint, they just trigger a re-render once
+// the registry subscribers fire.
+loadStoredFonts();
 
 const app = document.getElementById('app')!;
 app.innerHTML = `

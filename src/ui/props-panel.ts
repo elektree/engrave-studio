@@ -18,25 +18,19 @@ import { scaleForTargetSize } from '../patterns/svg-layer';
 import { makeSvg } from '../utils/svg';
 
 type FieldDef =
-  | { kind: 'number'; key: string; label: string; min?: number; max?: number; step?: number; modulatable?: boolean }
-  | { kind: 'slider'; key: string; label: string; min: number; max: number; step: number; modulatable?: boolean }
+  | { kind: 'number'; key: string; label: string; min?: number; max?: number; step?: number; modulatable?: boolean; hideModToggle?: boolean }
+  | { kind: 'slider'; key: string; label: string; min: number; max: number; step: number; modulatable?: boolean; hideModToggle?: boolean }
   | { kind: 'text';   key: string; label: string }
   | { kind: 'select'; key: string; label: string; options: string[] }
   | { kind: 'checkbox'; key: string; label: string }
   | { kind: 'layer-ids'; key: string; label: string };
 
-const BUILTIN_FONTS = [
-  'Noto Sans',
-  'Arial', 'Arial Black', 'Helvetica', 'Verdana', 'Tahoma', 'Trebuchet MS',
-  'Geneva', 'Lucida Sans', 'Lucida Sans Unicode', 'Lucida Grande',
-  'DejaVu Sans', 'Liberation Sans', 'Ubuntu', 'Cantarell', 'Segoe UI',
-  'Times New Roman', 'Times', 'Georgia', 'Palatino', 'Palatino Linotype',
-  'Book Antiqua', 'Garamond', 'Cambria', 'DejaVu Serif', 'Liberation Serif',
-  'Courier New', 'Courier', 'Consolas', 'Lucida Console', 'Monaco',
-  'DejaVu Sans Mono', 'Liberation Mono', 'Ubuntu Mono', 'Menlo',
-  'Impact', 'Comic Sans MS', 'Brush Script MT',
-  'sans-serif', 'serif', 'monospace',
-];
+// System fonts can't be reliably vectorised — we have no TTF to parse with
+// opentype.js, so grow/contours wouldn't work in laser mode AND the SVG export
+// would fall back to a <text> element that LightBurn probably can't render
+// with the same metrics. Keep the picker honest: Noto Sans (shipped asset) +
+// any font the user has uploaded.
+const BUILTIN_FONTS = ['Noto Sans'];
 
 const BUILTIN_SHAPES: ScatterShape[] = ['star', 'flower', 'rune', 'circle', 'custom'];
 
@@ -61,8 +55,10 @@ const FRIEZE_FIELDS: FieldDef[] = [
 
 const SCATTER_FIELDS: FieldDef[] = [
   { kind: 'select', key: 'shape', label: 'forme', options: [] },
-  { kind: 'checkbox', key: 'customForceStroke', label: 'forcer trait noir (custom)' },
-  { kind: 'number', key: 'density', label: 'densité / 100mm', min: 0.5, step: 0.5, modulatable: true },
+  { kind: 'checkbox', key: 'outlined', label: 'contours' },
+  { kind: 'number', key: 'minDistance', label: 'distance min (mm)', min: 0.1, step: 0.1 },
+  { kind: 'number', key: 'density', label: 'densité max', min: 0.5, step: 0.5 },
+  { kind: 'slider', key: 'densityFactor', label: 'facteur densité', min: 0, max: 1, step: 0.01, modulatable: true },
   { kind: 'number', key: 'minSize', label: 'taille min (mm)', min: 0.5, step: 0.5, modulatable: true },
   { kind: 'number', key: 'maxSize', label: 'taille max (mm)', min: 0.5, step: 0.5, modulatable: true },
   { kind: 'slider', key: 'rotationJitter', label: 'jitter rotation (°)', min: 0, max: 180, step: 5 },
@@ -96,19 +92,30 @@ const TEXT_FIELDS: FieldDef[] = [
   { kind: 'number', key: 'sizeMm', label: 'taille (mm)', min: 1, step: 0.5 },
   { kind: 'slider', key: 'rotation', label: 'rotation (°)', min: 0, max: 360, step: 1 },
   { kind: 'select', key: 'align', label: 'alignement', options: ['start', 'middle', 'end'] },
-  { kind: 'checkbox', key: 'textToPath', label: 'forcer trait noir' },
+  { kind: 'checkbox', key: 'textToPath', label: 'contours' },
   { kind: 'number', key: 'strokeWidth', label: 'trait (mm)', min: 0.05, step: 0.05 },
 ];
 
-const SHAPE_FIELDS: FieldDef[] = [
-  { kind: 'select', key: 'shape', label: 'forme', options: ['rect', 'ellipse'] },
-  { kind: 'number', key: 'width', label: 'largeur (mm)', min: 0.5, step: 0.5 },
-  { kind: 'number', key: 'height', label: 'hauteur (mm)', min: 0.5, step: 0.5 },
-  { kind: 'slider', key: 'rotation', label: 'rotation (°)', min: 0, max: 360, step: 1 },
-  { kind: 'number', key: 'cornerRadius', label: 'rayon coin (mm)', min: 0, step: 0.5 },
-  { kind: 'number', key: 'strokeWidth', label: 'trait (mm)', min: 0, step: 0.05 },
-  { kind: 'checkbox', key: 'fill', label: 'remplir (utile pour masque)' },
-];
+function shapeFieldsFor(params: { shape: string }): FieldDef[] {
+  const fields: FieldDef[] = [
+    { kind: 'select', key: 'shape', label: 'forme', options: ['rect', 'ellipse', 'star', 'polygon'] },
+    { kind: 'number', key: 'width', label: 'largeur (mm)', min: 0.5, step: 0.5 },
+    { kind: 'number', key: 'height', label: 'hauteur (mm)', min: 0.5, step: 0.5 },
+    { kind: 'slider', key: 'rotation', label: 'rotation (°)', min: 0, max: 360, step: 1 },
+  ];
+  if (params.shape === 'rect') {
+    fields.push({ kind: 'number', key: 'cornerRadius', label: 'rayon coin (mm)', min: 0, step: 0.5 });
+  }
+  if (params.shape === 'star') {
+    fields.push({ kind: 'number', key: 'branches', label: 'branches', min: 3, step: 1 });
+  }
+  if (params.shape === 'polygon') {
+    fields.push({ kind: 'number', key: 'sides', label: 'côtés', min: 3, step: 1 });
+  }
+  fields.push({ kind: 'number', key: 'strokeWidth', label: 'trait (mm)', min: 0, step: 0.05 });
+  fields.push({ kind: 'checkbox', key: 'outlined', label: 'contours' });
+  return fields;
+}
 
 const SVG_FIELDS: FieldDef[] = [
   // __svg_thumb__ is a synthetic key that renders the SVG preview thumbnail and
@@ -117,7 +124,9 @@ const SVG_FIELDS: FieldDef[] = [
   { kind: 'number', key: 'scale', label: 'échelle', min: 0.01, step: 0.05 },
   { kind: 'slider', key: 'rotation', label: 'rotation (°)', min: 0, max: 360, step: 1 },
   { kind: 'number', key: 'strokeWidth', label: 'trait (mm)', min: 0.05, step: 0.05 },
-  { kind: 'checkbox', key: 'forceStroke', label: 'forcer trait noir' },
+  { kind: 'checkbox', key: 'outlined', label: 'contours' },
+  { kind: 'slider', key: 'depthForBlack', label: 'noir → profondeur', min: 0, max: 1, step: 0.01 },
+  { kind: 'slider', key: 'depthForWhite', label: 'blanc → profondeur', min: 0, max: 1, step: 0.01 },
   { kind: 'checkbox', key: 'tile', label: 'répéter (texture)' },
   { kind: 'number', key: 'tileSpacingX', label: 'espace X texture (mm)', min: 0, step: 0.5 },
   { kind: 'number', key: 'tileSpacingY', label: 'espace Y texture (mm)', min: 0, step: 0.5 },
@@ -126,8 +135,21 @@ const SVG_FIELDS: FieldDef[] = [
 const LAYER_FIELDS: FieldDef[] = [
   { kind: 'number', key: 'offsetX', label: 'décalage X (mm)', step: 1 },
   { kind: 'number', key: 'offsetY', label: 'décalage Y (mm)', step: 0.5 },
-  { kind: 'number', key: 'grow', label: 'grossissement (mm)', min: 0, step: 0.1 },
+  // No min — negative grow shrinks (stroke-width clamps to 0 in applyGrow).
+  { kind: 'number', key: 'grow', label: 'grossissement (mm)', step: 0.1 },
 ];
+
+// Inserted into the pattern section right after `strokeWidth`. Lives on the
+// layer (scope='layer'), not on the pattern params. Its modulation is
+// independent of strokeWidth's; the capability is gated by the pattern (only
+// patterns whose strokeWidth is modulatable expose depth modulation).
+const DEPTH_FIELD: FieldDef = {
+  kind: 'slider', key: 'depth', label: 'profondeur',
+  min: 0, max: 1, step: 0.01,
+  modulatable: true,
+};
+
+const LAYER_FIELD_DEFAULTS_EXTRA: Record<string, number> = { depth: 0.5 };
 
 const TRANSLATED_KEYS = new Set(['variant', 'align', 'style', 'shape', 'cellShape']);
 
@@ -138,7 +160,7 @@ function patternFieldsFor(layer: Layer): FieldDef[] {
     case 'scatter':   return SCATTER_FIELDS;
     case 'text':      return TEXT_FIELDS;
     case 'maze':      return MAZE_FIELDS;
-    case 'shape':     return SHAPE_FIELDS;
+    case 'shape':     return shapeFieldsFor(layer.pattern.params);
     case 'svg':       return SVG_FIELDS;
   }
 }
@@ -160,10 +182,14 @@ export function mountPropsPanel(container: HTMLElement, store: Store): void {
   let entries: FieldEntry[] = [];
   let titleEl: HTMLElement | null = null;
 
-  // Signature includes mod keys and gradient enabled — those change UI structure.
+  // Signature includes mod keys and gradient enabled — those change UI
+  // structure. Shape variant is folded in too so changing rect → star
+  // (which exposes a different field set) triggers a rebuild.
   const sigOf = (layer: Layer): string => {
     const modKeys = Object.keys(layer.mods).sort().join(',');
-    return `${layer.id}:${layer.pattern.kind}:g${layer.gradient.enabled ? 1 : 0}:m${modKeys}`;
+    let extra = '';
+    if (layer.pattern.kind === 'shape') extra = `:s${layer.pattern.params.shape}`;
+    return `${layer.id}:${layer.pattern.kind}:g${layer.gradient.enabled ? 1 : 0}:m${modKeys}${extra}`;
   };
 
   const buildStructure = (layer: Layer): void => {
@@ -177,12 +203,29 @@ export function mountPropsPanel(container: HTMLElement, store: Store): void {
     const layerSection = section('Calque', container);
     for (const f of LAYER_FIELDS) entries.push(makeField(f, 'layer', layer, layerSection, store));
 
-    // Gradient editor — always present so user can enable any time.
-    const gradSection = section('Gradient', container);
-    entries.push(makeGradientField(layer, gradSection, store));
+    // Gradient editor only shows up when the current pattern has at least one
+    // modulatable field — otherwise the section is dead weight (text, shape,
+    // svg).
+    const hasModulatable = patternFieldsFor(layer).some(
+      (pf) => (pf.kind === 'slider' || pf.kind === 'number') && pf.modulatable === true,
+    );
+    if (hasModulatable) {
+      const gradSection = section('Gradient', container);
+      entries.push(makeGradientField(layer, gradSection, store));
+    }
 
     const patternSection = section(tr(layer.pattern.kind), container);
-    for (const f of patternFieldsFor(layer)) entries.push(makeField(f, 'pattern', layer, patternSection, store));
+    for (const f of patternFieldsFor(layer)) {
+      entries.push(makeField(f, 'pattern', layer, patternSection, store));
+      // Depth slides in right after each pattern's stroke field so the two
+      // related controls sit together. It's layer-scoped (lives on layer.depth)
+      // but rendered inside the pattern section. SVG layers skip it — their
+      // colour comes from the source via the depthForBlack/depthForWhite
+      // thresholds, which would override any per-layer depth anyway.
+      if (f.key === 'strokeWidth' && layer.pattern.kind !== 'svg') {
+        entries.push(makeField(DEPTH_FIELD, 'layer', layer, patternSection, store));
+      }
+    }
   };
 
   const refreshValues = (layer: Layer): void => {
@@ -275,11 +318,11 @@ function commitChange(store: Store, layerId: string, scope: Scope, key: string, 
 
 // Resolve the default value for a layer field — used by the label dblclick reset.
 const LAYER_DEFAULTS: Record<string, number> = {
-  offsetX: 0, offsetY: 0, grow: 0,
+  offsetX: 0, offsetY: 0, grow: 0, ...LAYER_FIELD_DEFAULTS_EXTRA,
 };
-function defaultValueFor(scope: Scope, layer: Layer, key: string, canvas: { width: number; height: number; unit: 'mm' }): number {
+function defaultValueFor(scope: Scope, layer: Layer, key: string, canvas: { width: number; height: number; unit: 'mm' }, kerf: number): number {
   if (scope === 'layer') return LAYER_DEFAULTS[key] ?? 0;
-  const pat = defaultPatternForKind(layer.pattern.kind, canvas);
+  const pat = defaultPatternForKind(layer.pattern.kind, canvas, kerf);
   const defaults = pat.params as unknown as Record<string, unknown>;
   const v = defaults[key];
   return typeof v === 'number' ? v : 0;
@@ -307,7 +350,7 @@ function attachNumericLabel(
       return Number(obj[f.key]) || 0;
     },
     setValue: (v) => commitChange(store, layer.id, scope, f.key, v),
-    defaultValue: defaultValueFor(scope, layer, f.key, store.get().canvas),
+    defaultValue: defaultValueFor(scope, layer, f.key, store.get().canvas, store.get().kerf),
     step,
     min: f.min,
     max: dragMax,
@@ -349,6 +392,14 @@ function makeSliderControl(
 }
 
 function makeField(f: FieldDef, scope: Scope, layer: Layer, parent: HTMLElement, store: Store): FieldEntry {
+  // Depth is coupled to the pattern's strokeWidth modulation. If the pattern
+  // doesn't expose stroke modulation at all (frieze, shape, text, svg), depth
+  // becomes a plain scalar slider — its modulation is irrelevant.
+  if (f.key === 'depth' && scope === 'layer' && (f.kind === 'slider' || f.kind === 'number')) {
+    const swField = patternFieldsFor(layer).find((pf) => pf.key === 'strokeWidth');
+    const swMod = swField && (swField.kind === 'slider' || swField.kind === 'number') && swField.modulatable;
+    if (!swMod) f = { ...f, modulatable: false };
+  }
   if (scope === 'pattern' && f.key === 'fontFamily') return makeFontField(f, layer, parent, store);
   if (scope === 'pattern' && f.key === 'shape' && layer.pattern.kind === 'scatter') {
     return makeScatterShapeField(f, layer, parent, store);
@@ -360,10 +411,10 @@ function makeField(f: FieldDef, scope: Scope, layer: Layer, parent: HTMLElement,
   if (scope === 'pattern' && f.key === 'rotation') return makeRotationField(f, scope, layer, parent, store);
   if (f.kind === 'layer-ids') return makeLayerIdsField(f, scope, layer, parent, store);
   // Modulatable field — exposes a "g" toggle that swaps the scalar control for
-  // a min/max pair driven by the layer gradient. Applies to slider AND number kinds.
+  // a min/max pair driven by the layer gradient. Applies to slider AND number
+  // kinds, and to either pattern OR layer scope (depth is layer-scoped).
   if (
-    scope === 'pattern'
-    && (f.kind === 'slider' || f.kind === 'number')
+    (f.kind === 'slider' || f.kind === 'number')
     && f.modulatable
   ) {
     return makeModulatedField(f, scope, layer, parent, store);
@@ -603,7 +654,7 @@ function makeRotationField(f: FieldDef, scope: Scope, layer: Layer, parent: HTML
       return Number(obj[f.key]) || 0;
     },
     setValue: (v) => commitChange(store, layer.id, scope, f.key, v),
-    defaultValue: defaultValueFor(scope, layer, f.key, store.get().canvas),
+    defaultValue: defaultValueFor(scope, layer, f.key, store.get().canvas, store.get().kerf),
     step: 1,
   });
   parent.appendChild(lbl);
@@ -865,8 +916,17 @@ function makeModulatedField(
   // The main label also gets drag-edit, scrubbing the scalar value.
   attachNumericLabel(span, f, scope, layer, store);
 
+  // Pattern-scope reads come from layer.pattern.params; layer-scope (e.g.
+  // `depth`) lives directly on the layer object.
+  const readScalar = (l: Layer): number => {
+    const src = scope === 'layer'
+      ? (l as unknown as Record<string, unknown>)
+      : (l.pattern.params as unknown as Record<string, unknown>);
+    return Number(src[f.key]) || 0;
+  };
+
   const isModulated = !!layer.mods[f.key];
-  const scalar = Number((layer.pattern.params as unknown as Record<string, number>)[f.key]) || 0;
+  const scalar = readScalar(layer);
 
   // Build the appropriate control(s) for this field's kind in either scalar
   // or min/max mode. `syncs` is what refresh() calls when the store changes.
@@ -896,7 +956,7 @@ function makeModulatedField(
   // since min/max wouldn't fit alongside the visible scrub track.
   const buildMod = () => {
     const m = layer.mods[f.key];
-    const dflt = defaultValueFor(scope, layer, f.key, store.get().canvas);
+    const dflt = defaultValueFor(scope, layer, f.key, store.get().canvas, store.get().kerf);
     const step = f.kind === 'slider' ? f.step : (f.step ?? 1);
     const writeMin = (v: number) => store.update((p) => {
       p.layers = p.layers.map((l) => l.id === layer.id
@@ -952,14 +1012,10 @@ function makeModulatedField(
         if (nextMods[f.key]) {
           delete nextMods[f.key];
         } else {
-          // Default sweep: from 0 to the current scalar value. If the scalar is
-          // already 0 we widen to the field's natural ceiling so the user sees
-          // an immediate effect.
-          const sc = Number((l.pattern.params as unknown as Record<string, number>)[f.key]) || 0;
+          const sc = readScalar(l);
           const ceiling = f.kind === 'slider' ? f.max : (f.max ?? Math.max(sc * 2, 1));
-          const minDefault = 0;
-          const maxDefault = sc > minDefault ? sc : ceiling;
-          nextMods[f.key] = { min: minDefault, max: maxDefault };
+          const maxDefault = sc > 0 ? sc : ceiling;
+          nextMods[f.key] = { min: 0, max: maxDefault };
         }
         return { ...l, mods: nextMods };
       });
@@ -970,10 +1026,7 @@ function makeModulatedField(
   const refresh = () => {
     const current = store.get().layers.find((l) => l.id === layer.id);
     if (!current) return;
-    if (syncs.scalar) {
-      const v = Number((current.pattern.params as unknown as Record<string, number>)[f.key]) || 0;
-      syncs.scalar(v);
-    }
+    if (syncs.scalar) syncs.scalar(readScalar(current));
     if (syncs.min && syncs.max && current.mods[f.key]) {
       syncs.min(current.mods[f.key].min);
       syncs.max(current.mods[f.key].max);
@@ -1015,7 +1068,10 @@ function renderShapeOption(value: ScatterShape, customSvg = ''): HTMLElement {
       wrap.appendChild(svg);
     }
   } else {
-    svg.appendChild(shapePath(value, dim / 2, dim / 2, dim - 6, 0, 0.6));
+    // Icons render as outlines so all five built-in shapes read clearly at
+    // the picker's small size, independent of the current layer's outlined
+    // toggle (filled silhouettes at 26px tend to collapse into a blob).
+    svg.appendChild(shapePath(value, dim / 2, dim / 2, dim - 6, 0, 0.6, null, '#000', true));
     wrap.appendChild(svg);
   }
   const lbl = document.createElement('span');

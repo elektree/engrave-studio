@@ -1,9 +1,13 @@
-import { GeometricParams, Canvas, Layer } from '../state/project';
+import { GeometricParams, Project, Layer, Canvas } from '../state/project';
 import { svgEl, line } from '../utils/svg';
 import { makeParamResolver } from './gradient';
+import { colorForDepth } from '../utils/palette';
 
-export function renderGeometric(params: GeometricParams, canvas: Canvas, layer?: Layer): SVGElement[] {
+export function renderGeometric(params: GeometricParams, project: Project, layer: Layer): SVGElement[] {
   const out: SVGElement[] = [];
+  const canvas = project.canvas;
+  const palette = project.palette;
+  const baseDepth = layer.depth;
   const sw = params.strokeWidth;
   const spacing = Math.max(params.spacing, 0.1);
   // Zone replaces the old margin. Defaults to canvas dimensions for safety.
@@ -39,7 +43,8 @@ export function renderGeometric(params: GeometricParams, canvas: Canvas, layer?:
       const ox = cx0 + px * u;
       const oy = cy0 + py * u;
       const swHere = Math.max(0.01, resolve('strokeWidth', sw, ox, oy));
-      parent.appendChild(line(ox - ex, oy - ey, ox + ex, oy + ey, swHere));
+      const color = colorForDepth(resolve('depth', baseDepth, ox, oy), palette);
+      parent.appendChild(line(ox - ex, oy - ey, ox + ex, oy + ey, swHere, color));
       u += Math.max(minStep, resolve('spacing', spacing, ox, oy));
     }
   };
@@ -61,14 +66,16 @@ export function renderGeometric(params: GeometricParams, canvas: Canvas, layer?:
       let safety = 0;
       while (x <= zw + 1e-6 && safety++ < 5000) {
         const swHere = Math.max(0.01, resolve('strokeWidth', sw, x, zh / 2));
-        wrap.appendChild(line(x, 0, x, zh, swHere));
+        const color = colorForDepth(resolve('depth', baseDepth, x, zh / 2), palette);
+        wrap.appendChild(line(x, 0, x, zh, swHere, color));
         x += Math.max(minStep, resolve('spacing', spacing, x, zh / 2));
       }
       let y = 0;
       safety = 0;
       while (y <= zh + 1e-6 && safety++ < 5000) {
         const swHere = Math.max(0.01, resolve('strokeWidth', sw, zw / 2, y));
-        wrap.appendChild(line(0, y, zw, y, swHere));
+        const color = colorForDepth(resolve('depth', baseDepth, zw / 2, y), palette);
+        wrap.appendChild(line(0, y, zw, y, swHere, color));
         y += Math.max(minStep, resolve('spacing', spacing, zw / 2, y));
       }
       break;
@@ -82,7 +89,8 @@ export function renderGeometric(params: GeometricParams, canvas: Canvas, layer?:
         let ySafety = 0;
         while (y <= zh + 1e-6 && ySafety++ < 10000) {
           const swHere = Math.max(0.01, resolve('strokeWidth', sw, x, y));
-          dotsGroup.appendChild(svgEl('circle', { cx: x, cy: y, r: swHere / 2, fill: '#000', stroke: 'none' }));
+          const color = colorForDepth(resolve('depth', baseDepth, x, y), palette);
+          dotsGroup.appendChild(svgEl('circle', { cx: x, cy: y, r: swHere / 2, fill: color, stroke: 'none' }));
           y += Math.max(minStep, resolve('spacing', spacing, x, y));
         }
         x += Math.max(minStep, resolve('spacing', spacing, x, 0));
@@ -96,12 +104,12 @@ export function renderGeometric(params: GeometricParams, canvas: Canvas, layer?:
   return out;
 }
 
-export function defaultGeometricParams(canvas?: Canvas): GeometricParams {
+export function defaultGeometricParams(canvas?: Canvas, kerf = 0.12): GeometricParams {
   return {
     variant: 'lines',
     spacing: 4,
     angle: 45,
-    strokeWidth: 0.2,
+    strokeWidth: kerf,
     zoneWidth: canvas?.width ?? 100,
     zoneHeight: canvas?.height ?? 35,
   };

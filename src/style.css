@@ -670,3 +670,120 @@ label {
    selected — otherwise they'd be noise. */
 .preview-wrap svg .mask-guide { opacity: 0; }
 .preview-wrap svg .mask-guide[data-selected="true"] { opacity: 0.25; }
+
+/* — Palette + depth — */
+.palette-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  font-size: 0.85em;
+  margin-top: 0.25em;
+}
+.palette-swatch {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 1px solid #888;
+  border-radius: 3px;
+}
+.layer-depth-dot {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  margin-right: 0.35em;
+  border: 1px solid #888;
+  flex-shrink: 0;
+}
+
+/* — Design / Laser toggle — */
+.preview-toggle {
+  display: inline-flex;
+  border: 1px solid #888;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.preview-toggle button {
+  border: none;
+  background: transparent;
+  padding: 0.3em 0.8em;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.preview-toggle button.active {
+  background: #333;
+  color: #fff;
+}
+
+/* — Modal (palette editor) — */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal {
+  background: #fff;
+  color: #222;
+  padding: 1.25rem 1.5rem;
+  border-radius: 8px;
+  min-width: 520px;
+  max-height: 80vh;
+  overflow: auto;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+.modal h2 { margin: 0 0 1rem 0; font-size: 1.1rem; }
+.palette-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+.palette-row {
+  display: grid;
+  grid-template-columns: 1fr 48px 1fr auto auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+.palette-row input[type="text"],
+.palette-row input[type="color"],
+.palette-row input[type="range"] { width: 100%; }
+.palette-value-label {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85em;
+  color: #555;
+  min-width: 2.5em;
+}
+.modal-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+/* — Ruler overlay (laser mode) — */
+.ruler-overlay text { user-select: none; pointer-events: none; }
+.warnings-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  font-size: 0.85em;
+}
+
+.canvas-overlay-controls {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid #bbb;
+  border-radius: 4px;
+  padding: 0.3em 0.6em;
+  z-index: 10;
+  font-size: 0.85em;
+  color: #222;
+}
+.preview-viewport { position: relative; }

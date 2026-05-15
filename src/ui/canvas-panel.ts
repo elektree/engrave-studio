@@ -1,10 +1,21 @@
 import { Store, Layer, Pattern } from '../state/project';
 import { buildPreviewSvg } from '../render/preview';
+import { materialPalette } from '../render/materials';
+import { subscribeFontRegistry } from '../state/font-registry';
 import { defaultSvgLayerParams, scaleForTargetSize } from '../patterns/svg-layer';
 import { makeLayer } from '../state/project';
+import { parseSvgViewBoxText } from '../utils/svg';
 import { tr } from '../i18n';
 
-type Edge = 'left' | 'right' | 'top' | 'bottom';
+type Edge = 'left' | 'right' | 'top' | 'bottom' | 'tl' | 'tr' | 'bl' | 'br';
+
+// Rotate a (dx, dy) canvas-frame delta into the shape-local frame.
+function rotateDelta(dx: number, dy: number, rotationDeg: number): { x: number; y: number } {
+  if (rotationDeg === 0) return { x: dx, y: dy };
+  const a = -rotationDeg * Math.PI / 180;
+  const c = Math.cos(a), s = Math.sin(a);
+  return { x: dx * c - dy * s, y: dx * s + dy * c };
+}
 
 export function mountCanvasPanel(container: HTMLElement, store: Store): void {
   container.innerHTML = '';
@@ -18,6 +29,26 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
   const wrap = document.createElement('div');
   wrap.className = 'preview-wrap';
   viewport.appendChild(wrap);
+
+  // Floating control bar — visible regardless of preview mode.
+  const overlay = document.createElement('div');
+  overlay.className = 'canvas-overlay-controls';
+
+  const rulerLabel = document.createElement('label');
+  rulerLabel.className = 'warnings-toggle';
+  const rulerInput = document.createElement('input');
+  rulerInput.type = 'checkbox';
+  rulerInput.checked = store.get().showRuler !== false;
+  rulerLabel.appendChild(rulerInput);
+  rulerLabel.appendChild(document.createTextNode(' Règle'));
+  rulerInput.onchange = () => store.update((p) => ({ ...p, showRuler: rulerInput.checked }));
+  overlay.appendChild(rulerLabel);
+
+  viewport.appendChild(overlay);
+  store.subscribe(() => {
+    const ruler = store.get().showRuler !== false;
+    if (rulerInput.checked !== ruler) rulerInput.checked = ruler;
+  });
 
   // viewBox-based pan/zoom — the canonical SVG zoom. The browser re-renders
   // vector content for every viewBox change so we never get rastered pixels.
@@ -39,9 +70,21 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
   // Recompute the overlay input's position + transform against the current
   // SVG text element's CTM. Called whenever the viewBox or the SVG tree
   // changes — keeps the overlay glued to the canvas instead of the viewport.
-  const repositionTextEditOverlay = () => {
+  // Resolve the live edit anchor for a text layer — <text> if it survived
+  // the renderer, otherwise the vectorised <path> (grow != 0 case), with
+  // the wrapper group as a final fallback so the overlay can at least sit
+  // at the right offset.
+  const findTextAnchor = (layerId: string): SVGGraphicsElement | null => {
+    const wrapEl = wrap.querySelector(`g[data-layer-id="${layerId}"]`) as SVGGraphicsElement | null;
+    if (!wrapEl) return null;
+    return (wrapEl.querySelector('text')
+      ?? wrapEl.querySelector('path[data-no-grow="true"]')
+      ?? wrapEl) as SVGGraphicsElement;
+  };
+
+  const repositionTextEditOverlay = (anchor?: SVGGraphicsElement | null) => {
     if (!textEditInput || !textEditingId) return;
-    const textEl = wrap.querySelector(`g[data-layer-id="${textEditingId}"] text`) as SVGTextElement | null;
+    const textEl = anchor ?? findTextAnchor(textEditingId);
     if (!textEl) return;
     const layer = store.get().layers.find((l) => l.id === textEditingId);
     if (!layer || layer.pattern.kind !== 'text') return;
@@ -75,15 +118,23 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
   const rerender = () => {
     wrap.innerHTML = '';
     const project = store.get();
-    svgRoot = buildPreviewSvg(project);
+    // Material aperçu: swap palette for the burn-colour ramp and strip any UI
+    // chrome (selection, ruler) so the canvas reads as a "final result" view.
+    // The actual store stays untouched — only the render input is overridden.
+    const material = project.previewMaterial;
+    const renderInput = material
+      ? { ...project, palette: materialPalette(material, project.palette), selectedLayerId: null, showRuler: false }
+      : project;
+    svgRoot = buildPreviewSvg(renderInput);
     applyViewBox();
     wrap.appendChild(svgRoot);
+    viewport.classList.toggle('preview-material', !!material);
+    viewport.classList.toggle(`preview-${material ?? ''}`, !!material);
     if (textEditingId) {
-      const editingEl = wrap.querySelector(`g[data-layer-id="${textEditingId}"] text`) as SVGTextElement | null;
-      if (editingEl) editingEl.style.visibility = 'hidden';
-      // The text element is a fresh DOM node — its CTM might differ if the
-      // user changed transforms (rotation, etc.) so re-anchor the overlay.
-      repositionTextEditOverlay();
+      const editingEl = findTextAnchor(textEditingId);
+      if (editingEl) (editingEl as unknown as HTMLElement).style.visibility = 'hidden';
+      // Fresh DOM node — CTM may differ if the user changed transforms.
+      repositionTextEditOverlay(editingEl);
     }
     const fonts = (document as unknown as { fonts?: FontFaceSet }).fonts;
     if (fonts) {
@@ -96,6 +147,10 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
   };
 
   store.subscribe(rerender);
+  // Font registry updates (custom uploads, Noto Sans async load completion)
+  // can change the synchronous vectoriser path in text.ts — re-render so the
+  // grow-aware text picks up the newly available font.
+  subscribeFontRegistry(rerender);
   rerender();
 
   const fonts = (document as unknown as { fonts?: FontFaceSet }).fonts;
@@ -150,6 +205,12 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     x0: number; y0: number; x1: number; y1: number;
     widthKey: string; heightKey: string;
     centred: boolean;
+    rotation: number;   // degrees, around the rect's centre (shape / svg only)
+    cx: number; cy: number;  // rect centre in canvas mm
+    // For SVG layers we don't have independent width/height — there's a single
+    // `scale` param. When set, applyZoneEdgeDrag converts size changes back
+    // into a scale multiplier (and enforces uniform aspect on every handle).
+    scaleBase?: number;
   };
   function selectedZoneRect(): ZoneRect | null {
     const project = store.get();
@@ -166,19 +227,46 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
         x1: sel.offsetX + zw, y1: sel.offsetY + zh,
         widthKey: 'zoneWidth', heightKey: 'zoneHeight',
         centred: false,
+        rotation: 0,
+        cx: sel.offsetX + zw / 2, cy: sel.offsetY + zh / 2,
       };
     }
     if (k === 'shape') {
-      const p = sel.pattern.params as { width: number; height: number };
+      const p = sel.pattern.params as { width: number; height: number; rotation: number };
       return {
         layerId: sel.id,
         x0: sel.offsetX - p.width / 2, y0: sel.offsetY - p.height / 2,
         x1: sel.offsetX + p.width / 2, y1: sel.offsetY + p.height / 2,
         widthKey: 'width', heightKey: 'height',
         centred: true,
+        rotation: p.rotation || 0,
+        cx: sel.offsetX, cy: sel.offsetY,
+      };
+    }
+    if (k === 'svg') {
+      const p = sel.pattern.params as { svgText: string; scale: number; rotation: number };
+      const vb = parseSvgViewBoxText(p.svgText);
+      const scale = Math.max(p.scale, 0.001);
+      const bboxW = vb.w * scale;
+      const bboxH = vb.h * scale;
+      return {
+        layerId: sel.id,
+        x0: sel.offsetX - bboxW / 2, y0: sel.offsetY - bboxH / 2,
+        x1: sel.offsetX + bboxW / 2, y1: sel.offsetY + bboxH / 2,
+        widthKey: 'scale', heightKey: 'scale',
+        centred: true,
+        rotation: p.rotation || 0,
+        cx: sel.offsetX, cy: sel.offsetY,
+        scaleBase: scale,
       };
     }
     return null;
+  }
+
+  // Convert a canvas-mm point into the rect's local (un-rotated) frame.
+  function toLocal(rect: ZoneRect, x: number, y: number): { x: number; y: number } {
+    const d = rotateDelta(x - rect.cx, y - rect.cy, rect.rotation);
+    return { x: d.x + rect.cx, y: d.y + rect.cy };
   }
 
   function hitEdge(canvasX: number, canvasY: number): Edge | null {
@@ -187,23 +275,54 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     const m = metrics();
     // 8 screen pixels in canvas mm — feels right regardless of zoom level.
     const tol = 8 / m.effScale;
-    // Check distance to each edge AND that we're inside the parallel range.
-    const insideX = canvasX > rect.x0 - tol && canvasX < rect.x1 + tol;
-    const insideY = canvasY > rect.y0 - tol && canvasY < rect.y1 + tol;
-    if (insideY && Math.abs(canvasX - rect.x0) < tol) return 'left';
-    if (insideY && Math.abs(canvasX - rect.x1) < tol) return 'right';
-    if (insideX && Math.abs(canvasY - rect.y0) < tol) return 'top';
-    if (insideX && Math.abs(canvasY - rect.y1) < tol) return 'bottom';
+    // Hit-test in the rect's local frame so rotated shapes get matching gizmos.
+    const { x: cx, y: cy } = toLocal(rect, canvasX, canvasY);
+    // Corner hits first (small priority box around each corner).
+    const nearLeft = Math.abs(cx - rect.x0) < tol;
+    const nearRight = Math.abs(cx - rect.x1) < tol;
+    const nearTop = Math.abs(cy - rect.y0) < tol;
+    const nearBottom = Math.abs(cy - rect.y1) < tol;
+    if (nearLeft && nearTop) return 'tl';
+    if (nearRight && nearTop) return 'tr';
+    if (nearLeft && nearBottom) return 'bl';
+    if (nearRight && nearBottom) return 'br';
+    const insideX = cx > rect.x0 - tol && cx < rect.x1 + tol;
+    const insideY = cy > rect.y0 - tol && cy < rect.y1 + tol;
+    if (insideY && nearLeft) return 'left';
+    if (insideY && nearRight) return 'right';
+    if (insideX && nearTop) return 'top';
+    if (insideX && nearBottom) return 'bottom';
     return null;
+  }
+
+  // Cursor hint based on the edge AND the rect's rotation. Rotation snaps to
+  // the nearest quadrant so the cursor visually matches the diagonal.
+  function cursorFor(edge: Edge, rotation: number): string {
+    // Normalise to [0, 360). For a 90°-rotated rect, what was 'left' becomes
+    // 'top' visually — so we rotate the cursor hint accordingly.
+    const r = ((rotation % 360) + 360) % 360;
+    const quadrant = Math.round(r / 90) % 4;  // 0..3 for 0/90/180/270
+    if (edge === 'left' || edge === 'right') {
+      return (quadrant === 1 || quadrant === 3) ? 'ns-resize' : 'ew-resize';
+    }
+    if (edge === 'top' || edge === 'bottom') {
+      return (quadrant === 1 || quadrant === 3) ? 'ew-resize' : 'ns-resize';
+    }
+    // Corners
+    if (edge === 'tl' || edge === 'br') {
+      return (quadrant === 1 || quadrant === 3) ? 'nesw-resize' : 'nwse-resize';
+    }
+    return (quadrant === 1 || quadrant === 3) ? 'nwse-resize' : 'nesw-resize';
   }
 
   function updateZoneCursor(e: MouseEvent) {
     if (drag) return; // cursor is set by drag mode
+    if (store.get().previewMaterial) { viewport.style.cursor = ''; return; }
     const pos = screenToCanvas(e.clientX, e.clientY);
     const edge = hitEdge(pos.x, pos.y);
-    if (edge === 'left' || edge === 'right') viewport.style.cursor = 'ew-resize';
-    else if (edge === 'top' || edge === 'bottom') viewport.style.cursor = 'ns-resize';
-    else viewport.style.cursor = '';
+    if (!edge) { viewport.style.cursor = ''; return; }
+    const rect = selectedZoneRect();
+    viewport.style.cursor = cursorFor(edge, rect?.rotation ?? 0);
   }
 
   type DragKind =
@@ -227,11 +346,40 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
         baseZw: number; baseZh: number;
         widthKey: string; heightKey: string;
         centred: boolean;
+        rotation: number;
+        // SVG layers: write the size change back as a scale multiplier on this
+        // base. Also forces uniform aspect on every handle (no non-uniform
+        // stretch on an imported vector).
+        scaleBase?: number;
       };
+
+  // Signed effect of each handle on the (X, Y) axes. -1 means "this side
+  // shrinks as the cursor moves positive on the axis", +1 means "grows", 0
+  // means "doesn't move along this axis".
+  const EDGE_INFO: Record<Edge, { sigX: -1 | 0 | 1; sigY: -1 | 0 | 1 }> = {
+    left:   { sigX: -1, sigY: 0 },
+    right:  { sigX: 1,  sigY: 0 },
+    top:    { sigX: 0,  sigY: -1 },
+    bottom: { sigX: 0,  sigY: 1 },
+    tl:     { sigX: -1, sigY: -1 },
+    tr:     { sigX: 1,  sigY: -1 },
+    bl:     { sigX: -1, sigY: 1 },
+    br:     { sigX: 1,  sigY: 1 },
+  };
 
   let drag: DragKind | null = null;
 
   viewport.addEventListener('mousedown', (e) => {
+    // Aperçu mode is a frozen render — pan still works, everything else is
+    // disabled to keep the "final result" view chrome-free and uneditable.
+    if (store.get().previewMaterial) {
+      if (e.button === 1) {
+        drag = { kind: 'pan', startX: e.clientX, startY: e.clientY, baseVbX: vbX, baseVbY: vbY };
+        viewport.classList.add('panning');
+        e.preventDefault();
+      }
+      return;
+    }
     if (e.button === 1) {
       drag = { kind: 'pan', startX: e.clientX, startY: e.clientY, baseVbX: vbX, baseVbY: vbY };
       viewport.classList.add('panning');
@@ -245,7 +393,10 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     if (edge) {
       const rect = selectedZoneRect()!;
       const sel = store.get().layers.find((l) => l.id === rect.layerId)!;
-      const p = sel.pattern.params as Record<string, unknown>;
+      // Bbox-in-mm comes from the rect for SVG layers (scale-derived), and
+      // straight from the params for the other layer kinds.
+      const baseZw = rect.scaleBase !== undefined ? rect.x1 - rect.x0 : (Number((sel.pattern.params as Record<string, unknown>)[rect.widthKey]) || (rect.x1 - rect.x0));
+      const baseZh = rect.scaleBase !== undefined ? rect.y1 - rect.y0 : (Number((sel.pattern.params as Record<string, unknown>)[rect.heightKey]) || (rect.y1 - rect.y0));
       drag = {
         kind: 'edge',
         layerId: rect.layerId,
@@ -254,11 +405,13 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
         startY: e.clientY,
         baseOffsetX: sel.offsetX,
         baseOffsetY: sel.offsetY,
-        baseZw: Number(p[rect.widthKey]) || (rect.x1 - rect.x0),
-        baseZh: Number(p[rect.heightKey]) || (rect.y1 - rect.y0),
+        baseZw,
+        baseZh,
         widthKey: rect.widthKey,
         heightKey: rect.heightKey,
         centred: rect.centred,
+        rotation: rect.rotation,
+        scaleBase: rect.scaleBase,
       };
       viewport.classList.add('resizing-zone');
       e.preventDefault();
@@ -267,29 +420,29 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     if (textEditingId) return; // active inline text edit owns the click
     const project = store.get();
 
-    // If the click landed on a text element, treat the click as a potential
-    // text-edit when the corresponding layer is already selected. Otherwise
-    // just select it (drag still possible after the selection is established).
+    // If the click landed inside a text layer's rendered group, treat it as
+    // a potential text-edit when that layer is already selected. We look at
+    // the closest [data-layer-id] ancestor rather than the click target's
+    // tag — vectorised text grows produce <path>, contours mode outputs
+    // outlined glyphs, both should still trigger the editor.
     const target = e.target as Element | null;
     let potentialEdit = false;
     let editClickEvent: MouseEvent | undefined;
-    if (target?.nodeName.toLowerCase() === 'text') {
-      const layerEl = target.closest('[data-layer-id]') as Element | null;
-      const clickedId = layerEl?.getAttribute('data-layer-id') ?? null;
-      const clickedLayer = clickedId
-        ? project.layers.find((l) => l.id === clickedId)
-        : undefined;
-      if (clickedLayer && clickedLayer.pattern.kind === 'text') {
-        if (project.selectedLayerId === clickedId) {
-          // Active text layer → potential edit if no drag.
-          potentialEdit = true;
-          editClickEvent = e;
-        } else {
-          // Text of a non-active layer: click is ignored entirely. The user
-          // must select the layer from the layers panel first.
-          e.preventDefault();
-          return;
-        }
+    const layerEl = target?.closest('[data-layer-id]') as Element | null;
+    const clickedId = layerEl?.getAttribute('data-layer-id') ?? null;
+    const clickedLayer = clickedId
+      ? project.layers.find((l) => l.id === clickedId)
+      : undefined;
+    if (clickedLayer && clickedLayer.pattern.kind === 'text') {
+      if (project.selectedLayerId === clickedId) {
+        potentialEdit = true;
+        editClickEvent = e;
+      } else {
+        // Text of a non-active layer: ignore the click — the user must select
+        // the layer from the layers panel first (avoids the cursor stealing
+        // focus while dragging another layer over a text).
+        e.preventDefault();
+        return;
       }
     }
 
@@ -347,7 +500,7 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     exitTextEdit(true);
     const layer = store.get().layers.find((l) => l.id === layerId);
     if (!layer || layer.pattern.kind !== 'text') return;
-    const textEl = wrap.querySelector(`g[data-layer-id="${layerId}"] text`) as SVGTextElement | null;
+    const textEl = findTextAnchor(layerId);
     if (!textEl) return;
     const original = layer.pattern.params.content;
     textEditOriginal = original;
@@ -404,8 +557,9 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
 
     // Hide the SVG text while editing so we don't render the old content
     // behind the live input.
-    const previousVisibility = textEl.style.visibility;
-    textEl.style.visibility = 'hidden';
+    const textElStyle = (textEl as unknown as HTMLElement).style;
+    const previousVisibility = textElStyle.visibility;
+    textElStyle.visibility = 'hidden';
 
     input.focus();
 
@@ -469,8 +623,8 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
       input.remove();
       // Restore the SVG text visibility — a fresh rerender will pick up the
       // committed content (or the restored original if Esc was pressed).
-      const stillThere = wrap.querySelector(`g[data-layer-id="${layerId}"] text`) as SVGTextElement | null;
-      if (stillThere) stillThere.style.visibility = previousVisibility;
+      const stillThere = findTextAnchor(layerId);
+      if (stillThere) (stillThere as unknown as HTMLElement).style.visibility = previousVisibility;
     };
   }
 
@@ -481,55 +635,102 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     const dxMm = (e.clientX - d.startX) / metrics().effScale;
     const dyMm = (e.clientY - d.startY) / metrics().effScale;
     const shift = e.shiftKey;
+    const info = EDGE_INFO[d.edge];
+    // SVG layers have one scale param — non-uniform stretching isn't meaningful,
+    // so any handle (edge or corner) goes through the uniform path.
+    const isCorner = (info.sigX !== 0 && info.sigY !== 0) || d.scaleBase !== undefined;
+    const minDim = 1;
     let nextOx = d.baseOffsetX;
     let nextOy = d.baseOffsetY;
     let nextZw = d.baseZw;
     let nextZh = d.baseZh;
-    const minDim = 1;
 
     if (d.centred) {
-      // Shapes are centred on offset → the symmetry is the opposite of zones.
-      // Normal drag: only one edge moves → both dimension and centre change.
-      // Shift: both edges move symmetrically → centre stays, dimension changes 2×.
-      if (d.edge === 'right') {
-        nextZw = Math.max(minDim, d.baseZw + (shift ? 2 * dxMm : dxMm));
-        if (!shift) nextOx = d.baseOffsetX + dxMm / 2;
-      } else if (d.edge === 'left') {
-        nextZw = Math.max(minDim, d.baseZw + (shift ? -2 * dxMm : -dxMm));
-        if (!shift) nextOx = d.baseOffsetX + dxMm / 2;
-      } else if (d.edge === 'bottom') {
-        nextZh = Math.max(minDim, d.baseZh + (shift ? 2 * dyMm : dyMm));
-        if (!shift) nextOy = d.baseOffsetY + dyMm / 2;
-      } else if (d.edge === 'top') {
-        nextZh = Math.max(minDim, d.baseZh + (shift ? -2 * dyMm : -dyMm));
-        if (!shift) nextOy = d.baseOffsetY + dyMm / 2;
+      // Shapes: rotate cursor delta into the shape-local frame so a handle
+      // labelled "right" actually grows the shape's local width regardless of
+      // the layer's rotation. With shift the centre stays put; without shift
+      // the opposite edge stays put and the centre tracks the cursor.
+      const local = rotateDelta(dxMm, dyMm, d.rotation);
+      const dxL = local.x;
+      const dyL = local.y;
+      if (isCorner) {
+        // Uniform scaling — aspect ratio preserved. Pick whichever axis has
+        // the larger relative change to drive the new scale.
+        const xRel = (info.sigX * dxL) / d.baseZw;
+        const yRel = (info.sigY * dyL) / d.baseZh;
+        const rel = Math.abs(xRel) > Math.abs(yRel) ? xRel : yRel;
+        const mult = shift ? 2 : 1;
+        nextZw = Math.max(minDim, d.baseZw * (1 + mult * rel));
+        nextZh = Math.max(minDim, d.baseZh * (1 + mult * rel));
+        if (!shift) {
+          // Anchor = opposite corner; centre shifts by half the equivalent
+          // local-frame corner movement in each axis.
+          const localCX = info.sigX * rel * d.baseZw / 2;
+          const localCY = info.sigY * rel * d.baseZh / 2;
+          const a = d.rotation * Math.PI / 180;
+          const cos = Math.cos(a), sin = Math.sin(a);
+          nextOx = d.baseOffsetX + localCX * cos - localCY * sin;
+          nextOy = d.baseOffsetY + localCX * sin + localCY * cos;
+        }
+      } else if (shift) {
+        nextZw = Math.max(minDim, d.baseZw + 2 * info.sigX * dxL);
+        nextZh = Math.max(minDim, d.baseZh + 2 * info.sigY * dyL);
+      } else {
+        nextZw = Math.max(minDim, d.baseZw + info.sigX * dxL);
+        nextZh = Math.max(minDim, d.baseZh + info.sigY * dyL);
+        const localCX = info.sigX !== 0 ? dxL / 2 : 0;
+        const localCY = info.sigY !== 0 ? dyL / 2 : 0;
+        const a = d.rotation * Math.PI / 180;
+        const cos = Math.cos(a), sin = Math.sin(a);
+        nextOx = d.baseOffsetX + localCX * cos - localCY * sin;
+        nextOy = d.baseOffsetY + localCX * sin + localCY * cos;
       }
     } else {
-      // Top-left anchored zones: left/top edges move the offset; right/bottom
-      // keep it fixed. Shift = symmetric around the centre.
-      if (d.edge === 'right') {
-        if (shift) { nextZw = Math.max(minDim, d.baseZw + 2 * dxMm); nextOx = d.baseOffsetX - dxMm; }
-        else nextZw = Math.max(minDim, d.baseZw + dxMm);
-      } else if (d.edge === 'left') {
-        if (shift) { nextZw = Math.max(minDim, d.baseZw - 2 * dxMm); nextOx = d.baseOffsetX + dxMm; }
-        else { nextZw = Math.max(minDim, d.baseZw - dxMm); nextOx = d.baseOffsetX + dxMm; }
-      } else if (d.edge === 'bottom') {
-        if (shift) { nextZh = Math.max(minDim, d.baseZh + 2 * dyMm); nextOy = d.baseOffsetY - dyMm; }
-        else nextZh = Math.max(minDim, d.baseZh + dyMm);
-      } else if (d.edge === 'top') {
-        if (shift) { nextZh = Math.max(minDim, d.baseZh - 2 * dyMm); nextOy = d.baseOffsetY + dyMm; }
-        else { nextZh = Math.max(minDim, d.baseZh - dyMm); nextOy = d.baseOffsetY + dyMm; }
+      // Top-left anchored zones: no rotation, work in canvas frame directly.
+      if (isCorner) {
+        const xRel = (info.sigX * dxMm) / d.baseZw;
+        const yRel = (info.sigY * dyMm) / d.baseZh;
+        const rel = Math.abs(xRel) > Math.abs(yRel) ? xRel : yRel;
+        const mult = shift ? 2 : 1;
+        nextZw = Math.max(minDim, d.baseZw * (1 + mult * rel));
+        nextZh = Math.max(minDim, d.baseZh * (1 + mult * rel));
+        if (shift) {
+          nextOx = d.baseOffsetX - rel * d.baseZw;
+          nextOy = d.baseOffsetY - rel * d.baseZh;
+        } else {
+          if (info.sigX === -1) nextOx = d.baseOffsetX - rel * d.baseZw;
+          if (info.sigY === -1) nextOy = d.baseOffsetY - rel * d.baseZh;
+        }
+      } else if (shift) {
+        nextZw = Math.max(minDim, d.baseZw + 2 * info.sigX * dxMm);
+        nextZh = Math.max(minDim, d.baseZh + 2 * info.sigY * dyMm);
+        nextOx = d.baseOffsetX - info.sigX * dxMm;
+        nextOy = d.baseOffsetY - info.sigY * dyMm;
+      } else {
+        nextZw = Math.max(minDim, d.baseZw + info.sigX * dxMm);
+        nextZh = Math.max(minDim, d.baseZh + info.sigY * dyMm);
+        if (info.sigX === -1) nextOx = d.baseOffsetX + dxMm;
+        if (info.sigY === -1) nextOy = d.baseOffsetY + dyMm;
       }
     }
 
     store.update((p) => {
       p.layers = p.layers.map((l) => {
         if (l.id !== d.layerId) return l;
-        const nextParams = {
-          ...(l.pattern.params as unknown as Record<string, unknown>),
-          [d.widthKey]: round2(nextZw),
-          [d.heightKey]: round2(nextZh),
-        };
+        const base = l.pattern.params as unknown as Record<string, unknown>;
+        let nextParams: Record<string, unknown>;
+        if (d.scaleBase !== undefined) {
+          // SVG layer — bbox-in-mm changes are written back as a scale
+          // multiplier on the original scale param.
+          const ratio = d.baseZw > 0 ? nextZw / d.baseZw : 1;
+          nextParams = { ...base, scale: round4(d.scaleBase * ratio) };
+        } else {
+          nextParams = {
+            ...base,
+            [d.widthKey]: round2(nextZw),
+            [d.heightKey]: round2(nextZh),
+          };
+        }
         return {
           ...l,
           offsetX: round2(nextOx),
@@ -557,7 +758,9 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     let dyPx = e.clientY - drag.startY;
     // Drag has to move past a small threshold before it counts — if the click
     // ends up being a tap on text we'll enter inline edit instead.
-    if (drag.potentialEdit && Math.hypot(dxPx, dyPx) > 4) drag.potentialEdit = false;
+    // Slightly more forgiving than the previous 4px to tolerate trackpad
+    // jitter and "wiggle" between mousedown and mouseup on a deliberate click.
+    if (drag.potentialEdit && Math.hypot(dxPx, dyPx) > 6) drag.potentialEdit = false;
     if (e.shiftKey) {
       if (Math.abs(dxPx) >= Math.abs(dyPx)) dyPx = 0; else dxPx = 0;
     }
@@ -610,7 +813,7 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
       // viewBox-based math: drop position straight to canvas-mm.
       const dropMm = screenToCanvas(e.clientX, e.clientY);
       const initialScale = scaleForTargetSize(text, 60);
-      const params = defaultSvgLayerParams(text, initialScale);
+      const params = defaultSvgLayerParams(text, initialScale, store.get().kerf);
       const pattern: Pattern = { kind: 'svg', params };
       store.update((p) => {
         const baseName = svgFile.name.replace(/\.svg$/i, '');
@@ -632,16 +835,15 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
       vbY = drag.baseVbY;
       applyViewBox();
     } else if (drag.kind === 'edge') {
-      const { layerId, baseOffsetX, baseOffsetY, baseZw, baseZh, widthKey, heightKey } = drag;
+      const d = drag;
       store.update((p) => {
         p.layers = p.layers.map((l) => {
-          if (l.id !== layerId) return l;
-          const np = {
-            ...(l.pattern.params as unknown as Record<string, unknown>),
-            [widthKey]: baseZw,
-            [heightKey]: baseZh,
-          };
-          return { ...l, offsetX: baseOffsetX, offsetY: baseOffsetY, pattern: { ...l.pattern, params: np } as Layer['pattern'] };
+          if (l.id !== d.layerId) return l;
+          const base = l.pattern.params as unknown as Record<string, unknown>;
+          const np = d.scaleBase !== undefined
+            ? { ...base, scale: d.scaleBase }
+            : { ...base, [d.widthKey]: d.baseZw, [d.heightKey]: d.baseZh };
+          return { ...l, offsetX: d.baseOffsetX, offsetY: d.baseOffsetY, pattern: { ...l.pattern, params: np } as Layer['pattern'] };
         });
       });
     } else {
@@ -660,4 +862,8 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+function round4(n: number): number {
+  return Math.round(n * 10000) / 10000;
 }

@@ -1,6 +1,8 @@
 import { Store } from '../state/project';
 import { exportProjectJson, importProjectJson } from '../state/persistence';
 import { exportLaserSvg } from '../render/export';
+import { openPaletteEditor } from './palette-editor';
+import { MATERIAL_IDS, MATERIAL_LABELS, MaterialId } from '../render/materials';
 
 export function mountHeader(container: HTMLElement, store: Store): void {
   // Build once — header is small and its structure doesn't depend on store updates.
@@ -28,13 +30,59 @@ export function mountHeader(container: HTMLElement, store: Store): void {
   container.appendChild(field('W', wInput));
   container.appendChild(field('H', hInput));
 
+  const kerfInput = document.createElement('input');
+  kerfInput.type = 'number';
+  kerfInput.value = String(store.get().kerf);
+  kerfInput.step = '0.01';
+  kerfInput.min = '0.01';
+  kerfInput.style.width = '70px';
+  kerfInput.title = 'Largeur de trait du laser (mm)';
+  kerfInput.oninput = () => {
+    const v = Number(kerfInput.value);
+    if (!Number.isFinite(v) || v <= 0) return;
+    store.update((p) => ({ ...p, kerf: v }));
+  };
+  container.appendChild(field('kerf', kerfInput));
+
+  container.appendChild(separator());
+
+  // Aperçu select — Édition is the default "" entry, each material below it
+  // switches the canvas into the chrome-free preview using that material's
+  // backdrop + burn-colour ramp.
+  const previewSelect = document.createElement('select');
+  previewSelect.className = 'preview-select';
+  previewSelect.title = 'Mode d\'affichage';
+  const editOpt = document.createElement('option');
+  editOpt.value = '';
+  editOpt.textContent = 'Édition';
+  previewSelect.appendChild(editOpt);
+  for (const id of MATERIAL_IDS) {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = `Aperçu — ${MATERIAL_LABELS[id]}`;
+    previewSelect.appendChild(opt);
+  }
+  const refreshToggle = () => {
+    const mat = store.get().previewMaterial ?? '';
+    if (previewSelect.value !== mat) previewSelect.value = mat;
+  };
+  previewSelect.onchange = () => {
+    const v = previewSelect.value;
+    store.update((p) => ({ ...p, previewMaterial: (v || undefined) as MaterialId | undefined }));
+  };
+  container.appendChild(previewSelect);
+
   const spacer = document.createElement('div');
   spacer.className = 'header-spacer';
   container.appendChild(spacer);
 
-  const strokeOnly = document.createElement('input');
-  strokeOnly.type = 'checkbox'; strokeOnly.checked = true;
-  container.appendChild(field('traits seuls', strokeOnly));
+  const paletteBtn = document.createElement('button');
+  paletteBtn.type = 'button';
+  paletteBtn.className = 'ghost';
+  paletteBtn.textContent = 'Palette…';
+  paletteBtn.title = 'Modifier la palette de profondeurs';
+  paletteBtn.onclick = () => openPaletteEditor(store);
+  container.appendChild(paletteBtn);
 
   container.appendChild(separator());
 
@@ -65,9 +113,7 @@ export function mountHeader(container: HTMLElement, store: Store): void {
   exportBtn.textContent = 'Exporter SVG';
   exportBtn.onclick = async () => {
     try {
-      const svg = await exportLaserSvg(store.get(), {
-        strokeOnly: strokeOnly.checked,
-      });
+      const svg = await exportLaserSvg(store.get());
       const blob = new Blob([svg], { type: 'image/svg+xml' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -87,7 +133,10 @@ export function mountHeader(container: HTMLElement, store: Store): void {
     if (document.activeElement !== nameInput && nameInput.value !== p.name) nameInput.value = p.name;
     if (document.activeElement !== wInput && Number(wInput.value) !== p.canvas.width) wInput.value = String(p.canvas.width);
     if (document.activeElement !== hInput && Number(hInput.value) !== p.canvas.height) hInput.value = String(p.canvas.height);
+    if (document.activeElement !== kerfInput && Number(kerfInput.value) !== p.kerf) kerfInput.value = String(p.kerf);
+    refreshToggle();
   });
+  refreshToggle();
 }
 
 function numberInput(value: number, step: number, onChange: (v: number) => void): HTMLInputElement {

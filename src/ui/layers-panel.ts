@@ -23,6 +23,20 @@ function nextBlend(mode: BlendMode): BlendMode {
 export function mountLayersPanel(container: HTMLElement, store: Store): void {
   container.classList.add('layers-panel');
 
+  // Empty-area click anywhere in the panel (title bar, gap between rows,
+  // below the last row) deselects. Rows and the add-layer affordances stop
+  // propagation / are filtered out, so only true "no-target" clicks reach us.
+  container.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement | null;
+    if (!t) return;
+    if (t.closest('.layer-row')) return;
+    if (t.closest('.layers-add')) return;
+    if (t.closest('.add-layer-popup')) return;
+    if (store.get().selectedLayerId) {
+      store.update((p) => { p.selectedLayerId = null; });
+    }
+  });
+
   // Tracks the id of the layer currently being dragged — dataTransfer is
   // unreadable during `dragover`, so we keep our own reference.
   let draggingId: string | null = null;
@@ -51,7 +65,7 @@ export function mountLayersPanel(container: HTMLElement, store: Store): void {
 
     const addLayerOfKind = (kind: typeof PATTERN_KINDS[number]) => {
       store.update((p) => {
-        const l = makeLayer(defaultPatternForKind(kind, p.canvas), `${tr(kind)} ${p.layers.length + 1}`);
+        const l = makeLayer(defaultPatternForKind(kind, p.canvas, p.kerf), `${tr(kind)} ${p.layers.length + 1}`);
         if (kind === 'shape') {
           l.offsetX = p.canvas.width / 2;
           l.offsetY = p.canvas.height / 2;
