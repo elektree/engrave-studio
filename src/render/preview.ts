@@ -1,9 +1,10 @@
-import { Project, Layer, BlendMode, TextParams } from '../state/project';
+import { Project, Layer, BlendMode, TextParams, BezierParams } from '../state/project';
 import { makeSvg, rect, svgEl, applyGrow, paintForMask, parseSvgViewBoxText } from '../utils/svg';
 import { renderLayer } from '../patterns';
 import { buildRulerOverlay } from './ruler';
 import { MATERIAL_BG } from './materials';
 import { textBboxHalfMetrics } from '../patterns/text';
+import { bezierShapeBBox, buildPathD as bezierPathD } from '../patterns/bezier';
 
 function wrapLayer(layer: Layer, elements: SVGElement[]): SVGGElement {
   const g = svgEl('g', {
@@ -41,7 +42,19 @@ function buildMaskDef(
   return mask;
 }
 
-export function buildPreviewSvg(project: Project): SVGSVGElement {
+export type PreviewUiState = {
+  // Bezier-specific UI mode for the selected layer.
+  //   'draw'  → in-progress pen-tool trace; minimal red overlay.
+  //   'edit'  → editing anchors/handles; full type-aware overlay, no bbox.
+  //   undefined → bounds mode; show bbox+resize gizmo, hide anchor overlay.
+  bezierMode?: 'draw' | 'edit';
+  // Index of the anchor whose handle is being actively dragged in pen mode
+  // (mouse-down phase right after a new anchor was placed). Used to show its
+  // temporary marker + dotted handle line; cleared on mouseup.
+  bezierDraggingAnchorIdx?: number;
+};
+
+export function buildPreviewSvg(project: Project, uiState: PreviewUiState = {}): SVGSVGElement {
   const { width: W, height: H } = project.canvas;
   const svg = makeSvg(W, H);
 
@@ -80,6 +93,15 @@ export function buildPreviewSvg(project: Project): SVGSVGElement {
     // as a faint guide and we don't reach further down the stack.
     const below = project.layers[i - 1];
     const targetable = below && below.visible && below.blendMode === 'normal';
+
+    // wrapLayer below mutates `elements` in-place when grow != 0 (applyGrow
+    // walks the tree and changes stroke-width / geometry). The mask def needs
+    // FRESH (un-grown) elements so its own applyGrow doesn't compound — pre-
+    // clone before the guide step. Cheap and only when grow is active.
+    const maskElements: SVGElement[] = layer.grow !== 0
+      ? elements.map((e) => e.cloneNode(true) as SVGElement)
+      : elements;
+
     // Skip the ghost-guide in material preview — it's pure UI chrome that
     // would muddy the "final result" view.
     if (!material) {
@@ -92,7 +114,7 @@ export function buildPreviewSvg(project: Project): SVGSVGElement {
     if (!target) continue;
 
     const maskId = `mask_${layer.id}`;
-    defs.appendChild(buildMaskDef(maskId, layer.blendMode, layer, elements, W, H));
+    defs.appendChild(buildMaskDef(maskId, layer.blendMode, layer, maskElements, W, H));
     const wrapped = svgEl('g', { mask: `url(#${maskId})` });
     wrapped.appendChild(target);
     stack[stack.length - 1] = wrapped;
@@ -136,18 +158,31 @@ export function buildPreviewSvg(project: Project): SVGSVGElement {
       ox = selectedLayer.offsetX - zw / 2;
       oy = selectedLayer.offsetY - zh / 2;
       rotation = p.rotation || 0;
+    } else if (k === 'bezier') {
+      // The bezier bbox gizmo only shows in bounds mode (uiState.bezierMode
+      // is undefined). Draw / edit modes use the dedicated anchor overlay
+      // instead and skip the bbox entirely.
+      const p = selectedLayer.pattern.params as BezierParams;
+      if (!uiState.bezierMode && p.anchors.length >= 2) {
+        const bb = bezierShapeBBox(p.anchors, p.closed);
+        zw = Math.max(0, bb.x1 - bb.x0);
+        zh = Math.max(0, bb.y1 - bb.y0);
+        ox = selectedLayer.offsetX + bb.x0;
+        oy = selectedLayer.offsetY + bb.y0;
+        rotation = p.rotation || 0;
+      }
     }
     if (zw > 0 && zh > 0) {
       // Group the outline + corner handles so a single rotate transform covers
-      // both. Rotation pivot is the shape's centre (offset for shapes, bbox
-      // centre for zones — which is unrotated, so no visual change).
-      const cx = ox + zw / 2;
-      const cy = oy + zh / 2;
+      // both. Rotation pivot = the layer origin (canvas position of local
+      // (0,0)). For shape / SVG this equals the bbox centre too; for bezier
+      // the bbox may be off-centre but the layer still rotates around (0,0)
+      // — keeping the gizmo and the rendered shape on the same pivot.
       const gizmoGroup = svgEl('g', {
         class: 'gizmo-group',
         // Keep materializeForLaser away — the gizmo is preview-only UI chrome.
         'data-no-expand': 'true',
-        ...(rotation ? { transform: `rotate(${rotation} ${cx} ${cy})` } : {}),
+        ...(rotation ? { transform: `rotate(${rotation} ${selectedLayer.offsetX} ${selectedLayer.offsetY})` } : {}),
       });
       gizmoGroup.appendChild(svgEl('rect', {
         x: ox, y: oy, width: zw, height: zh,
@@ -168,6 +203,139 @@ export function buildPreviewSvg(project: Project): SVGSVGElement {
         }));
       }
       svg.appendChild(gizmoGroup);
+    }
+  }
+
+  // Bezier overlay. Two modes:
+  //   draw → minimal red overlay (round dot at anchor 0 as a "first point"
+  //          reference, plus a dotted line + dot at the anchor currently
+  //          being placed while its handle is being dragged out).
+  //   edit → full interactive overlay with type-shaped markers + handles.
+  // bounds (uiState.bezierMode undefined) → no overlay, just the bbox gizmo.
+  if (selectedLayer && selectedLayer.pattern.kind === 'bezier' && !material
+      && (uiState.bezierMode === 'edit' || uiState.bezierMode === 'draw')) {
+    const params = selectedLayer.pattern.params as BezierParams;
+    if (params.anchors.length > 0) {
+      const rot = params.rotation || 0;
+      const isDraw = uiState.bezierMode === 'draw';
+      const wrap = svgEl('g', {
+        'data-no-expand': 'true',
+        class: 'bezier-overlay' + (isDraw ? ' bezier-overlay-readonly' : ''),
+        ...(isDraw ? { 'pointer-events': 'none' } : {}),
+        transform: `translate(${selectedLayer.offsetX} ${selectedLayer.offsetY})${rot ? ` rotate(${rot})` : ''}`,
+      });
+
+      if (isDraw) {
+        // Anchor 0 marker — visible throughout draw mode so the user knows
+        // where to click to close. Other anchors are NOT marked once their
+        // mouseup has fired; only the in-progress one (dragIdx) is.
+        const dragIdx = uiState.bezierDraggingAnchorIdx;
+        const indicesToMark = new Set<number>();
+        if (params.anchors.length > 0) indicesToMark.add(0);
+        if (typeof dragIdx === 'number' && dragIdx >= 0 && dragIdx < params.anchors.length) {
+          indicesToMark.add(dragIdx);
+        }
+        for (const i of indicesToMark) {
+          const a = params.anchors[i];
+          wrap.appendChild(svgEl('circle', {
+            cx: a.x, cy: a.y, r: 0.55,
+            fill: '#dc2626', stroke: 'none',
+            class: 'bezier-anchor-draw',
+          }));
+        }
+        // Handle preview: red dotted line from the in-progress anchor to its
+        // outgoing handle endpoint (which tracks the cursor during the drag).
+        if (typeof dragIdx === 'number' && dragIdx >= 0 && dragIdx < params.anchors.length) {
+          const a = params.anchors[dragIdx];
+          if (a.hxOut !== 0 || a.hyOut !== 0) {
+            wrap.appendChild(svgEl('line', {
+              x1: a.x, y1: a.y, x2: a.x + a.hxOut, y2: a.y + a.hyOut,
+              stroke: '#dc2626', 'stroke-width': 0.18,
+              'stroke-dasharray': '0.5 0.4',
+            }));
+          }
+          // Mirror line for the incoming handle (helps the user see the
+          // symmetric handle they're growing).
+          if (a.hxIn !== 0 || a.hyIn !== 0) {
+            wrap.appendChild(svgEl('line', {
+              x1: a.x, y1: a.y, x2: a.x + a.hxIn, y2: a.y + a.hyIn,
+              stroke: '#dc2626', 'stroke-width': 0.18,
+              'stroke-dasharray': '0.5 0.4', opacity: 0.6,
+            }));
+          }
+        }
+        svg.appendChild(wrap);
+      } else {
+        // EDIT MODE — full overlay with hit-testable markers.
+        // Segment hit-targets first (lowest z): an invisible thick path
+        // receiving double-clicks for "insert anchor".
+        // pointer-events: stroke makes the otherwise-invisible (transparent)
+        // stroke catch hover/click events along its width.
+        const segHit = svgEl('path', {
+          d: bezierPathD(params.anchors, params.closed),
+          fill: 'none',
+          stroke: 'transparent',
+          'stroke-width': 1.8,
+          'pointer-events': 'stroke',
+          'data-bezier-segment': 'true',
+          'data-layer-id': selectedLayer.id,
+        });
+        wrap.appendChild(segHit);
+        const n = params.anchors.length;
+        // Handle lines + handle dots — only when a neighbour exists for that side.
+        for (let i = 0; i < n; i++) {
+          const a = params.anchors[i];
+          const hasIn = params.closed || i > 0;
+          const hasOut = params.closed || i < n - 1;
+          if (hasIn && (a.hxIn !== 0 || a.hyIn !== 0)) {
+            wrap.appendChild(svgEl('line', {
+              x1: a.x, y1: a.y, x2: a.x + a.hxIn, y2: a.y + a.hyIn,
+              stroke: '#c2410c', 'stroke-width': 0.1, opacity: 0.7,
+            }));
+            wrap.appendChild(svgEl('circle', {
+              cx: a.x + a.hxIn, cy: a.y + a.hyIn, r: 0.4,
+              fill: 'white', stroke: '#c2410c', 'stroke-width': 0.12,
+              'data-bezier-handle': 'in',
+              'data-bezier-anchor-idx': String(i),
+              'data-layer-id': selectedLayer.id,
+              class: 'bezier-handle',
+            }));
+          }
+          if (hasOut && (a.hxOut !== 0 || a.hyOut !== 0)) {
+            wrap.appendChild(svgEl('line', {
+              x1: a.x, y1: a.y, x2: a.x + a.hxOut, y2: a.y + a.hyOut,
+              stroke: '#c2410c', 'stroke-width': 0.1, opacity: 0.7,
+            }));
+            wrap.appendChild(svgEl('circle', {
+              cx: a.x + a.hxOut, cy: a.y + a.hyOut, r: 0.4,
+              fill: 'white', stroke: '#c2410c', 'stroke-width': 0.12,
+              'data-bezier-handle': 'out',
+              'data-bezier-anchor-idx': String(i),
+              'data-layer-id': selectedLayer.id,
+              class: 'bezier-handle',
+            }));
+          }
+        }
+        // Anchors on top of the handles so they're always grabbable. Shape
+        // encodes the anchor type:
+        //   symmetric → square   smooth → circle   corner/line → diamond
+        // First anchor of an open path is tinted brighter so the close-click
+        // target is obvious.
+        for (let i = 0; i < n; i++) {
+          const a = params.anchors[i];
+          const isFirstOpen = i === 0 && !params.closed;
+          const fill = isFirstOpen ? '#ea580c' : '#c2410c';
+          wrap.appendChild(makeAnchorMarker(a, {
+            fill,
+            stroke: 'white',
+            'stroke-width': 0.1,
+            'data-bezier-anchor-idx': String(i),
+            'data-layer-id': selectedLayer.id,
+            class: 'bezier-anchor',
+          }));
+        }
+        svg.appendChild(wrap);
+      }
     }
   }
 
@@ -199,4 +367,24 @@ export function buildPreviewSvg(project: Project): SVGSVGElement {
   }
 
   return svg;
+}
+
+// Bezier anchor marker shaped per type — visual cue at a glance for which
+// constraint applies. corner and line share the diamond (they're both
+// "non-curve" anchors; line happens to lock handles to zero).
+function makeAnchorMarker(
+  a: { x: number; y: number; type: 'line' | 'corner' | 'smooth' | 'symmetric' },
+  attrs: Record<string, string | number>,
+): SVGElement {
+  if (a.type === 'smooth') {
+    return svgEl('circle', { cx: a.x, cy: a.y, r: 0.45, ...attrs });
+  }
+  if (a.type === 'symmetric') {
+    const s = 0.7;
+    return svgEl('rect', { x: a.x - s / 2, y: a.y - s / 2, width: s, height: s, ...attrs });
+  }
+  // corner | line → diamond (square rotated 45°)
+  const s = 0.55;
+  const pts = `${a.x},${a.y - s} ${a.x + s},${a.y} ${a.x},${a.y + s} ${a.x - s},${a.y}`;
+  return svgEl('polygon', { points: pts, ...attrs });
 }

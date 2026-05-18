@@ -1,4 +1,4 @@
-import { Store, Layer, Pattern } from '../state/project';
+import { Store, Layer, Pattern, BezierAnchor, BezierParams } from '../state/project';
 import { buildPreviewSvg } from '../render/preview';
 import { materialPalette } from '../render/materials';
 import { subscribeFontRegistry } from '../state/font-registry';
@@ -6,6 +6,8 @@ import { defaultSvgLayerParams, scaleForTargetSize } from '../patterns/svg-layer
 import { makeLayer } from '../state/project';
 import { parseSvgViewBoxText } from '../utils/svg';
 import { tr } from '../i18n';
+import { splitCubic, bezierShapeBBox, normalizeAnchorForType, defaultHandlesForAnchor } from '../patterns/bezier';
+import type { BezierAnchorType } from '../state/project';
 
 type Edge = 'left' | 'right' | 'top' | 'bottom' | 'tl' | 'tr' | 'bl' | 'br';
 
@@ -50,6 +52,26 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     if (rulerInput.checked !== ruler) rulerInput.checked = ruler;
   });
 
+  // Floating message shown while the selected bezier layer is empty in
+  // draw mode — disappears as soon as the first anchor is placed.
+  const drawMessage = document.createElement('div');
+  drawMessage.className = 'canvas-draw-message';
+  drawMessage.textContent = 'Cliquez pour placer le premier point';
+  drawMessage.style.cssText =
+    'position:absolute;top:12px;left:50%;transform:translateX(-50%);'
+    + 'background:rgba(220,38,38,0.92);color:white;padding:6px 14px;'
+    + 'border-radius:14px;font-size:13px;pointer-events:none;'
+    + 'display:none;z-index:5;font-weight:500;';
+  viewport.appendChild(drawMessage);
+  const updateDrawMessageVisibility = (): void => {
+    const p = store.get();
+    const sel = p.layers.find((l) => l.id === p.selectedLayerId);
+    const show = !!sel && sel.pattern.kind === 'bezier'
+      && sel.pattern.params.anchors.length === 0
+      && getBezierMode() === 'draw';
+    drawMessage.style.display = show ? 'block' : 'none';
+  };
+
   // viewBox-based pan/zoom — the canonical SVG zoom. The browser re-renders
   // vector content for every viewBox change so we never get rastered pixels.
   let vbX = 0;        // viewBox origin in canvas mm
@@ -64,6 +86,60 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
   let textEditInput: HTMLInputElement | null = null;
   let textEditDetach: (() => void) | null = null;
   let textEditOriginal = '';
+
+  // Bezier UI mode for the selected layer. Three states:
+  //   { mode: 'draw' } — pen-tool active, path not yet committed. No gizmos.
+  //   { mode: 'edit' } — anchors editable, no bbox.
+  //   null            — bounds mode (default for an existing bezier layer);
+  //                     bbox gizmo + draggable, single click on the shape
+  //                     re-enters edit mode.
+  let bezierUiMode: { layerId: string; mode: 'draw' | 'edit' } | null = null;
+  // Last anchor the user interacted with — Backspace targets this index.
+  let activeAnchorIdx: { layerId: string; idx: number } | null = null;
+  // Current drag — declared up here (rerender reads it for the bezier
+  // pen-handle preview overlay). The DragKind union is declared further down
+  // but TS type declarations are hoisted so the annotation resolves fine.
+  let drag: DragKind | null = null;
+
+  const getBezierMode = (): 'draw' | 'edit' | null => {
+    if (!bezierUiMode) return null;
+    const sel = store.get().selectedLayerId;
+    if (sel !== bezierUiMode.layerId) return null;
+    const layer = store.get().layers.find((l) => l.id === bezierUiMode!.layerId);
+    if (!layer || layer.pattern.kind !== 'bezier') return null;
+    return bezierUiMode.mode;
+  };
+
+  // Sync mode flag with the store: a freshly-created empty bezier layer
+  // enters draw mode automatically; switching to another layer drops mode.
+  store.subscribe(() => {
+    const p = store.get();
+    const sel = p.layers.find((l) => l.id === p.selectedLayerId);
+    if (sel && sel.pattern.kind === 'bezier' && sel.pattern.params.anchors.length === 0
+        && (!bezierUiMode || bezierUiMode.layerId !== sel.id)) {
+      bezierUiMode = { layerId: sel.id, mode: 'draw' };
+    } else if (bezierUiMode && p.selectedLayerId !== bezierUiMode.layerId) {
+      bezierUiMode = null;
+    }
+    if (activeAnchorIdx && activeAnchorIdx.layerId !== p.selectedLayerId) {
+      activeAnchorIdx = null;
+    }
+  });
+
+  // Screen-mm → bezier local coordinate. Local frame is centred on
+  // layer.offset; rotation pivots around the local origin so the inverse is
+  // a straight unrotate around (0, 0). This is the same pivot used by the
+  // renderer + overlay, and it stays constant across anchor edits → no drift.
+  const canvasToBezierLocal = (layer: Layer, canvasX: number, canvasY: number): { x: number; y: number } => {
+    if (layer.pattern.kind !== 'bezier') return { x: canvasX - layer.offsetX, y: canvasY - layer.offsetY };
+    const rot = layer.pattern.params.rotation || 0;
+    const dx = canvasX - layer.offsetX;
+    const dy = canvasY - layer.offsetY;
+    if (rot === 0) return { x: dx, y: dy };
+    const a = -rot * Math.PI / 180;
+    const c = Math.cos(a), s = Math.sin(a);
+    return { x: dx * c - dy * s, y: dx * s + dy * c };
+  };
 
   const getCanvasDims = () => store.get().canvas;
 
@@ -125,7 +201,12 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     const renderInput = material
       ? { ...project, palette: materialPalette(material, project.palette), selectedLayerId: null, showRuler: false }
       : project;
-    svgRoot = buildPreviewSvg(renderInput);
+    const uiState = {
+      bezierMode: getBezierMode() ?? undefined,
+      bezierDraggingAnchorIdx: (drag && drag.kind === 'bezier-pen-handle') ? drag.idx : undefined,
+    };
+    svgRoot = buildPreviewSvg(renderInput, uiState);
+    updateDrawMessageVisibility();
     applyViewBox();
     wrap.appendChild(svgRoot);
     viewport.classList.toggle('preview-material', !!material);
@@ -211,6 +292,10 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     // `scale` param. When set, applyZoneEdgeDrag converts size changes back
     // into a scale multiplier (and enforces uniform aspect on every handle).
     scaleBase?: number;
+    // For bezier layers: a snapshot of the anchors at drag-start, plus the
+    // bbox half-extents in local coords. applyZoneEdgeDrag scales the
+    // anchors by ratioX/ratioY when these are set.
+    bezierBase?: { anchors: BezierAnchor[]; baseW: number; baseH: number; bbCxLocal: number; bbCyLocal: number };
   };
   function selectedZoneRect(): ZoneRect | null {
     const project = store.get();
@@ -258,6 +343,35 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
         rotation: p.rotation || 0,
         cx: sel.offsetX, cy: sel.offsetY,
         scaleBase: scale,
+      };
+    }
+    if (k === 'bezier') {
+      // Only expose the edge gizmo in bounds mode (no edit, no draw). The
+      // bbox hugs the rendered shape (sampled), not the control hull.
+      if (bezierUiMode && bezierUiMode.layerId === sel.id) return null;
+      const p = sel.pattern.params as BezierParams;
+      if (p.anchors.length < 2) return null;
+      const bb = bezierShapeBBox(p.anchors, p.closed);
+      const w = Math.max(0.0001, bb.x1 - bb.x0);
+      const h = Math.max(0.0001, bb.y1 - bb.y0);
+      const cxLocal = (bb.x0 + bb.x1) / 2;
+      const cyLocal = (bb.y0 + bb.y1) / 2;
+      // Rotation pivot for the gizmo = the layer origin (canvas position of
+      // local (0, 0)). Same pivot used by the renderer / overlay; the bbox
+      // may sit off-centre but it orbits the same point.
+      return {
+        layerId: sel.id,
+        x0: sel.offsetX + bb.x0, y0: sel.offsetY + bb.y0,
+        x1: sel.offsetX + bb.x1, y1: sel.offsetY + bb.y1,
+        widthKey: '__bezier_w__', heightKey: '__bezier_h__',
+        centred: true,
+        rotation: p.rotation || 0,
+        cx: sel.offsetX, cy: sel.offsetY,
+        bezierBase: {
+          anchors: p.anchors.map((a) => ({ ...a })),
+          baseW: w, baseH: h,
+          bbCxLocal: cxLocal, bbCyLocal: cyLocal,
+        },
       };
     }
     return null;
@@ -351,6 +465,25 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
         // base. Also forces uniform aspect on every handle (no non-uniform
         // stretch on an imported vector).
         scaleBase?: number;
+        // Bezier layers: snapshot of the anchors at drag-start; applyZoneEdgeDrag
+        // scales their coords by the new bbox ratios.
+        bezierBase?: { anchors: BezierAnchor[]; baseW: number; baseH: number; bbCxLocal: number; bbCyLocal: number };
+      }
+    | {
+        kind: 'bezier-anchor'; layerId: string; idx: number;
+        baseAnchor: BezierAnchor;
+        startLocal: { x: number; y: number };
+      }
+    | {
+        kind: 'bezier-handle'; layerId: string; idx: number;
+        side: 'in' | 'out';
+        baseAnchor: BezierAnchor;
+        startLocal: { x: number; y: number };
+      }
+    | {
+        // Pen mode: dragging out the handles of the anchor just added.
+        kind: 'bezier-pen-handle'; layerId: string; idx: number;
+        startLocal: { x: number; y: number };
       };
 
   // Signed effect of each handle on the (X, Y) axes. -1 means "this side
@@ -366,8 +499,6 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     bl:     { sigX: -1, sigY: 1 },
     br:     { sigX: 1,  sigY: 1 },
   };
-
-  let drag: DragKind | null = null;
 
   viewport.addEventListener('mousedown', (e) => {
     // Aperçu mode is a frozen render — pan still works, everything else is
@@ -387,6 +518,140 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
       return;
     }
     if (e.button !== 0) return;
+
+    // ── Bezier interactions ────────────────────────────────────────────────
+    // Three modes: draw (no gizmos, pen-tool) / edit (anchor gizmos) / bounds
+    // (bbox + resize like shape layers). Each mode owns its hit-testing here.
+    {
+      const project = store.get();
+      const sel = project.layers.find((l) => l.id === project.selectedLayerId);
+      if (sel && sel.pattern.kind === 'bezier') {
+        const params = sel.pattern.params;
+        const mPx = metrics().effScale;
+        const posMm = screenToCanvas(e.clientX, e.clientY);
+        const local = canvasToBezierLocal(sel, posMm.x, posMm.y);
+        const tolMm = 8 / mPx;
+        const layerId = sel.id;
+        const mode = getBezierMode();
+
+        if (mode === 'draw') {
+          // Click on first anchor closes the path (requires ≥ 2 anchors)
+          // AND counts as draft validation — same as Enter / explicit commit.
+          if (params.anchors.length >= 2 && !params.closed) {
+            const a0 = params.anchors[0];
+            if (Math.hypot(local.x - a0.x, local.y - a0.y) <= tolMm) {
+              commitBezierDraft(layerId, true);
+              rerender(); // mode flipped to 'edit'; rerender shows anchors
+              e.preventDefault();
+              return;
+            }
+          }
+          // Otherwise: append a new anchor; drag grows handles symmetrically.
+          const newAnchor: BezierAnchor = {
+            x: local.x, y: local.y,
+            hxIn: 0, hyIn: 0, hxOut: 0, hyOut: 0,
+            type: 'symmetric',
+          };
+          let newIdx = -1;
+          store.update((p) => {
+            p.layers = p.layers.map((l) => {
+              if (l.id !== layerId || l.pattern.kind !== 'bezier') return l;
+              const anchors = [...l.pattern.params.anchors, newAnchor];
+              newIdx = anchors.length - 1;
+              return { ...l, pattern: { ...l.pattern, params: { ...l.pattern.params, anchors } } };
+            });
+          });
+          activeAnchorIdx = { layerId, idx: newIdx };
+          drag = { kind: 'bezier-pen-handle', layerId, idx: newIdx, startLocal: local };
+          viewport.classList.add('dragging-layer');
+          e.preventDefault();
+          return;
+        }
+
+        if (mode === 'edit') {
+          // Anchor hit-test (highest priority — the marker sits on top).
+          let anchorIdx = -1;
+          for (let i = 0; i < params.anchors.length; i++) {
+            const a = params.anchors[i];
+            if (Math.hypot(local.x - a.x, local.y - a.y) <= tolMm) { anchorIdx = i; break; }
+          }
+          if (anchorIdx >= 0) {
+            const a = params.anchors[anchorIdx];
+            activeAnchorIdx = { layerId, idx: anchorIdx };
+            drag = { kind: 'bezier-anchor', layerId, idx: anchorIdx, baseAnchor: { ...a }, startLocal: local };
+            viewport.classList.add('dragging-layer');
+            e.preventDefault();
+            return;
+          }
+          // Handle hit-test (only visible handles count).
+          let handleHit: { idx: number; side: 'in' | 'out' } | null = null;
+          for (let i = 0; i < params.anchors.length; i++) {
+            const a = params.anchors[i];
+            const hasIn = params.closed || i > 0;
+            const hasOut = params.closed || i < params.anchors.length - 1;
+            if (hasIn && (a.hxIn !== 0 || a.hyIn !== 0)) {
+              if (Math.hypot(local.x - (a.x + a.hxIn), local.y - (a.y + a.hyIn)) <= tolMm) { handleHit = { idx: i, side: 'in' }; break; }
+            }
+            if (hasOut && (a.hxOut !== 0 || a.hyOut !== 0)) {
+              if (Math.hypot(local.x - (a.x + a.hxOut), local.y - (a.y + a.hyOut)) <= tolMm) { handleHit = { idx: i, side: 'out' }; break; }
+            }
+          }
+          if (handleHit) {
+            const a = params.anchors[handleHit.idx];
+            activeAnchorIdx = { layerId, idx: handleHit.idx };
+            drag = { kind: 'bezier-handle', layerId, idx: handleHit.idx, side: handleHit.side, baseAnchor: { ...a }, startLocal: local };
+            viewport.classList.add('dragging-layer');
+            e.preventDefault();
+            return;
+          }
+          // Double-click on the segment overlay → insert anchor at the click
+          // location (de Casteljau split preserves the curve shape).
+          if (e.detail === 2) {
+            const tgt = e.target as Element | null;
+            const segEl = tgt?.closest('[data-bezier-segment="true"]') as SVGPathElement | null;
+            if (segEl && segEl.getAttribute('data-layer-id') === sel.id) {
+              insertAnchorAt(sel.id, local);
+              e.preventDefault();
+              return;
+            }
+          }
+          // No anchor / handle / segment hit. Edit mode is sticky: clicks
+          // outside the geometry are swallowed (no-op). Only Escape or a
+          // layer switch exits — per the explicit spec.
+          e.preventDefault();
+          return;
+        }
+
+        if (mode === null) {
+          // Bounds mode. Edge gizmo wins first (uses its own hit-test below).
+          // If the click falls inside the bbox interior (not on any edge),
+          // treat it as a potential-edit drag: a quick tap enters edit mode,
+          // a real drag moves the layer.
+          const rect = selectedZoneRect();
+          const edgeHit = rect ? hitEdge(posMm.x, posMm.y) : null;
+          if (rect && !edgeHit) {
+            const lp = toLocal(rect, posMm.x, posMm.y);
+            const inside = lp.x > rect.x0 && lp.x < rect.x1 && lp.y > rect.y0 && lp.y < rect.y1;
+            if (inside) {
+              drag = {
+                kind: 'layer',
+                layerId: sel.id,
+                startX: e.clientX,
+                startY: e.clientY,
+                baseOx: sel.offsetX,
+                baseOy: sel.offsetY,
+                pxPerMm: metrics().effScale,
+                potentialEdit: true,
+              };
+              viewport.classList.add('dragging-layer');
+              e.preventDefault();
+              return;
+            }
+          }
+        }
+      }
+    }
+
     // Zone edge gizmo takes priority over layer drag.
     const pos = screenToCanvas(e.clientX, e.clientY);
     const edge = hitEdge(pos.x, pos.y);
@@ -395,8 +660,14 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
       const sel = store.get().layers.find((l) => l.id === rect.layerId)!;
       // Bbox-in-mm comes from the rect for SVG layers (scale-derived), and
       // straight from the params for the other layer kinds.
-      const baseZw = rect.scaleBase !== undefined ? rect.x1 - rect.x0 : (Number((sel.pattern.params as Record<string, unknown>)[rect.widthKey]) || (rect.x1 - rect.x0));
-      const baseZh = rect.scaleBase !== undefined ? rect.y1 - rect.y0 : (Number((sel.pattern.params as Record<string, unknown>)[rect.heightKey]) || (rect.y1 - rect.y0));
+      // Base dimensions for the drag: scale-derived for SVG, anchor-derived
+      // for bezier (rect carries the snapshot), pattern-param for others.
+      const baseZw = rect.bezierBase ? rect.bezierBase.baseW
+        : rect.scaleBase !== undefined ? rect.x1 - rect.x0
+        : (Number((sel.pattern.params as Record<string, unknown>)[rect.widthKey]) || (rect.x1 - rect.x0));
+      const baseZh = rect.bezierBase ? rect.bezierBase.baseH
+        : rect.scaleBase !== undefined ? rect.y1 - rect.y0
+        : (Number((sel.pattern.params as Record<string, unknown>)[rect.heightKey]) || (rect.y1 - rect.y0));
       drag = {
         kind: 'edge',
         layerId: rect.layerId,
@@ -412,6 +683,7 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
         centred: rect.centred,
         rotation: rect.rotation,
         scaleBase: rect.scaleBase,
+        bezierBase: rect.bezierBase,
       };
       viewport.classList.add('resizing-zone');
       e.preventDefault();
@@ -463,7 +735,94 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     e.preventDefault();
   });
 
-  viewport.addEventListener('contextmenu', (e) => e.preventDefault());
+  viewport.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    // Bezier edit mode: right-click on an anchor opens a small menu with the
+    // type choices + delete. Right-click elsewhere is silently swallowed.
+    const project = store.get();
+    const sel = project.layers.find((l) => l.id === project.selectedLayerId);
+    if (!sel || sel.pattern.kind !== 'bezier' || getBezierMode() !== 'edit') return;
+    const posMm = screenToCanvas(e.clientX, e.clientY);
+    const local = canvasToBezierLocal(sel, posMm.x, posMm.y);
+    const tolMm = 8 / metrics().effScale;
+    let anchorIdx = -1;
+    for (let i = 0; i < sel.pattern.params.anchors.length; i++) {
+      const a = sel.pattern.params.anchors[i];
+      if (Math.hypot(local.x - a.x, local.y - a.y) <= tolMm) { anchorIdx = i; break; }
+    }
+    if (anchorIdx < 0) return;
+    openBezierAnchorMenu(sel.id, anchorIdx, e.clientX, e.clientY);
+  });
+
+  // Floating menu next to an anchor — emits type changes / delete for the
+  // selected anchor and dismisses on outside-click.
+  function openBezierAnchorMenu(layerId: string, anchorIdx: number, x: number, y: number): void {
+    document.querySelectorAll('.bezier-anchor-menu').forEach((el) => el.remove());
+    const layer = store.get().layers.find((l) => l.id === layerId);
+    if (!layer || layer.pattern.kind !== 'bezier') return;
+    const current = layer.pattern.params.anchors[anchorIdx];
+    if (!current) return;
+    const menu = document.createElement('div');
+    menu.className = 'add-layer-popup bezier-anchor-menu';
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+    const labels: Record<BezierAnchorType, string> = {
+      line: 'Ligne',
+      corner: 'Angle',
+      smooth: 'Lissé',
+      symmetric: 'Symétrique',
+    };
+    const types: BezierAnchorType[] = ['line', 'corner', 'smooth', 'symmetric'];
+    const closeMenu = () => {
+      menu.remove();
+      document.removeEventListener('mousedown', onOutside, true);
+    };
+    for (const t of types) {
+      const item = document.createElement('div');
+      item.className = 'add-layer-popup-item' + (current.type === t ? ' active' : '');
+      item.textContent = `${current.type === t ? '✓ ' : ''}${labels[t]}`;
+      item.addEventListener('mousedown', (ev) => {
+        ev.preventDefault();
+        store.update((p) => {
+          p.layers = p.layers.map((l) => {
+            if (l.id !== layerId || l.pattern.kind !== 'bezier') return l;
+            const params = l.pattern.params;
+            const closedFlag = params.closed;
+            const anchorsRef = params.anchors;
+            const anchors = anchorsRef.map((aa, idx) => {
+              if (idx !== anchorIdx) return aa;
+              // Switching FROM line (or otherwise zero-handled anchor) TO a
+              // curve type → synthesize default handles based on neighbours.
+              const allZero = aa.hxIn === 0 && aa.hyIn === 0 && aa.hxOut === 0 && aa.hyOut === 0;
+              const target: BezierAnchor = (t !== 'line' && allZero)
+                ? { ...aa, ...defaultHandlesForAnchor(anchorsRef, idx, closedFlag) }
+                : aa;
+              return normalizeAnchorForType(target, t);
+            });
+            return { ...l, pattern: { ...l.pattern, params: { ...params, anchors } } };
+          });
+        });
+        recentreBezierToBBox(layerId);
+        closeMenu();
+      });
+      menu.appendChild(item);
+    }
+    const sep = document.createElement('div');
+    sep.className = 'add-layer-popup-item';
+    sep.style.borderTop = '1px solid #444';
+    sep.textContent = 'Supprimer ce point';
+    sep.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      deleteBezierAnchor(layerId, anchorIdx);
+      closeMenu();
+    });
+    menu.appendChild(sep);
+    document.body.appendChild(menu);
+    const onOutside = (ev: MouseEvent) => {
+      if (!menu.contains(ev.target as Node)) closeMenu();
+    };
+    setTimeout(() => document.addEventListener('mousedown', onOutside, true), 0);
+  }
   viewport.addEventListener('mousemove', updateZoneCursor);
 
   // ── Inline text editing via overlay <input> ─────────────
@@ -634,11 +993,21 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
   function applyZoneEdgeDrag(d: Extract<DragKind, { kind: 'edge' }>, e: MouseEvent) {
     const dxMm = (e.clientX - d.startX) / metrics().effScale;
     const dyMm = (e.clientY - d.startY) / metrics().effScale;
-    const shift = e.shiftKey;
+    // Modifier semantics:
+    //   Ctrl  → mirror around the bbox centre (centre stays put, edge moves
+    //           both ways). Was the old Shift behaviour.
+    //   Shift → preserve aspect ratio (edge drags scale both axes; corner
+    //           drags already do this).
+    //   Cmd is treated as Ctrl on macOS.
+    const mirror = e.ctrlKey || e.metaKey;
+    const lockAspect = e.shiftKey;
     const info = EDGE_INFO[d.edge];
-    // SVG layers have one scale param — non-uniform stretching isn't meaningful,
-    // so any handle (edge or corner) goes through the uniform path.
-    const isCorner = (info.sigX !== 0 && info.sigY !== 0) || d.scaleBase !== undefined;
+    const isPureCorner = info.sigX !== 0 && info.sigY !== 0;
+    // Pure corners scale X / Y independently by default (cursor tracks the
+    // grabbed corner exactly, opposite corner stays canvas-stable). Aspect
+    // locking is opt-in via Shift. SVG layers force the uniform path because
+    // they only have a single `scale` param.
+    const treatAsCorner = d.scaleBase !== undefined || lockAspect;
     const minDim = 1;
     let nextOx = d.baseOffsetX;
     let nextOy = d.baseOffsetY;
@@ -647,24 +1016,32 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
 
     if (d.centred) {
       // Shapes: rotate cursor delta into the shape-local frame so a handle
-      // labelled "right" actually grows the shape's local width regardless of
-      // the layer's rotation. With shift the centre stays put; without shift
-      // the opposite edge stays put and the centre tracks the cursor.
+      // labelled "right" actually grows the shape's local width regardless
+      // of the layer's rotation.
       const local = rotateDelta(dxMm, dyMm, d.rotation);
       const dxL = local.x;
       const dyL = local.y;
-      if (isCorner) {
-        // Uniform scaling — aspect ratio preserved. Pick whichever axis has
-        // the larger relative change to drive the new scale.
-        const xRel = (info.sigX * dxL) / d.baseZw;
-        const yRel = (info.sigY * dyL) / d.baseZh;
-        const rel = Math.abs(xRel) > Math.abs(yRel) ? xRel : yRel;
-        const mult = shift ? 2 : 1;
+      if (treatAsCorner) {
+        // Uniform scaling — aspect ratio preserved. The "dominant" axis is
+        // whichever side info points along: pure corner = larger of the two;
+        // edge + lockAspect = the edge's own axis (the other is zero).
+        let rel: number;
+        if (isPureCorner) {
+          const xRel = (info.sigX * dxL) / d.baseZw;
+          const yRel = (info.sigY * dyL) / d.baseZh;
+          rel = Math.abs(xRel) > Math.abs(yRel) ? xRel : yRel;
+        } else if (info.sigX !== 0) {
+          rel = (info.sigX * dxL) / d.baseZw;
+        } else {
+          rel = (info.sigY * dyL) / d.baseZh;
+        }
+        const mult = mirror ? 2 : 1;
         nextZw = Math.max(minDim, d.baseZw * (1 + mult * rel));
         nextZh = Math.max(minDim, d.baseZh * (1 + mult * rel));
-        if (!shift) {
-          // Anchor = opposite corner; centre shifts by half the equivalent
-          // local-frame corner movement in each axis.
+        if (!mirror) {
+          // Anchor = opposite corner (for pure corners) or opposite edge mid
+          // for lock-aspect edges. Centre shifts by half the equivalent
+          // local-frame corner movement on each non-zero axis.
           const localCX = info.sigX * rel * d.baseZw / 2;
           const localCY = info.sigY * rel * d.baseZh / 2;
           const a = d.rotation * Math.PI / 180;
@@ -672,7 +1049,7 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
           nextOx = d.baseOffsetX + localCX * cos - localCY * sin;
           nextOy = d.baseOffsetY + localCX * sin + localCY * cos;
         }
-      } else if (shift) {
+      } else if (mirror) {
         nextZw = Math.max(minDim, d.baseZw + 2 * info.sigX * dxL);
         nextZh = Math.max(minDim, d.baseZh + 2 * info.sigY * dyL);
       } else {
@@ -687,21 +1064,28 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
       }
     } else {
       // Top-left anchored zones: no rotation, work in canvas frame directly.
-      if (isCorner) {
-        const xRel = (info.sigX * dxMm) / d.baseZw;
-        const yRel = (info.sigY * dyMm) / d.baseZh;
-        const rel = Math.abs(xRel) > Math.abs(yRel) ? xRel : yRel;
-        const mult = shift ? 2 : 1;
+      if (treatAsCorner) {
+        let rel: number;
+        if (isPureCorner) {
+          const xRel = (info.sigX * dxMm) / d.baseZw;
+          const yRel = (info.sigY * dyMm) / d.baseZh;
+          rel = Math.abs(xRel) > Math.abs(yRel) ? xRel : yRel;
+        } else if (info.sigX !== 0) {
+          rel = (info.sigX * dxMm) / d.baseZw;
+        } else {
+          rel = (info.sigY * dyMm) / d.baseZh;
+        }
+        const mult = mirror ? 2 : 1;
         nextZw = Math.max(minDim, d.baseZw * (1 + mult * rel));
         nextZh = Math.max(minDim, d.baseZh * (1 + mult * rel));
-        if (shift) {
+        if (mirror) {
           nextOx = d.baseOffsetX - rel * d.baseZw;
           nextOy = d.baseOffsetY - rel * d.baseZh;
         } else {
           if (info.sigX === -1) nextOx = d.baseOffsetX - rel * d.baseZw;
           if (info.sigY === -1) nextOy = d.baseOffsetY - rel * d.baseZh;
         }
-      } else if (shift) {
+      } else if (mirror) {
         nextZw = Math.max(minDim, d.baseZw + 2 * info.sigX * dxMm);
         nextZh = Math.max(minDim, d.baseZh + 2 * info.sigY * dyMm);
         nextOx = d.baseOffsetX - info.sigX * dxMm;
@@ -719,7 +1103,21 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
         if (l.id !== d.layerId) return l;
         const base = l.pattern.params as unknown as Record<string, unknown>;
         let nextParams: Record<string, unknown>;
-        if (d.scaleBase !== undefined) {
+        if (d.bezierBase) {
+          // Bezier: scale every anchor coord + handle vector around the bbox
+          // centre by the new ratios. Coords stay in centred-local frame.
+          const bz = d.bezierBase;
+          const rx = bz.baseW > 0 ? nextZw / bz.baseW : 1;
+          const ry = bz.baseH > 0 ? nextZh / bz.baseH : 1;
+          const anchors = bz.anchors.map((a) => ({
+            ...a,
+            x: bz.bbCxLocal + (a.x - bz.bbCxLocal) * rx,
+            y: bz.bbCyLocal + (a.y - bz.bbCyLocal) * ry,
+            hxIn: a.hxIn * rx, hyIn: a.hyIn * ry,
+            hxOut: a.hxOut * rx, hyOut: a.hyOut * ry,
+          }));
+          nextParams = { ...base, anchors };
+        } else if (d.scaleBase !== undefined) {
           // SVG layer — bbox-in-mm changes are written back as a scale
           // multiplier on the original scale param.
           const ratio = d.baseZw > 0 ? nextZw / d.baseZw : 1;
@@ -741,6 +1139,161 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     });
   }
 
+  // Shift anchors so the bbox centre sits at the local origin (0, 0), then
+  // compensate layer.offset (rotation-aware) so the shape stays visually put.
+  // Keeps the rotation pivot (= local origin) aligned with the visual centre
+  // after edits / resizes. Cheap to call repeatedly — early-outs when already
+  // centred.
+  function recentreBezierToBBox(layerId: string): void {
+    const layer = store.get().layers.find((l) => l.id === layerId);
+    if (!layer || layer.pattern.kind !== 'bezier') return;
+    const params = layer.pattern.params;
+    if (params.anchors.length < 1) return;
+    const bb = bezierShapeBBox(params.anchors, params.closed);
+    const cx = (bb.x0 + bb.x1) / 2;
+    const cy = (bb.y0 + bb.y1) / 2;
+    if (Math.abs(cx) < 0.001 && Math.abs(cy) < 0.001) return;
+    const rot = (params.rotation || 0) * Math.PI / 180;
+    const cos = Math.cos(rot), sin = Math.sin(rot);
+    const dxCanvas = cx * cos - cy * sin;
+    const dyCanvas = cx * sin + cy * cos;
+    store.update((p) => {
+      p.layers = p.layers.map((l) => {
+        if (l.id !== layerId || l.pattern.kind !== 'bezier') return l;
+        const anchors = l.pattern.params.anchors.map((a) => ({
+          ...a,
+          x: a.x - cx,
+          y: a.y - cy,
+        }));
+        return {
+          ...l,
+          offsetX: l.offsetX + dxCanvas,
+          offsetY: l.offsetY + dyCanvas,
+          pattern: { ...l.pattern, params: { ...l.pattern.params, anchors } },
+        };
+      });
+    });
+  }
+
+  // Finalize a draft trace: auto-recentre anchors so the bbox centre sits at
+  // the layer origin (cleaner editing afterwards) and switch to edit mode.
+  // Returns true if the draft was committed; false if it was discarded.
+  function commitBezierDraft(layerId: string, close: boolean): boolean {
+    const layer = store.get().layers.find((l) => l.id === layerId);
+    if (!layer || layer.pattern.kind !== 'bezier') return false;
+    const params = layer.pattern.params;
+    if (params.anchors.length < 2) {
+      // Degenerate trace: drop the whole layer.
+      store.update((p) => {
+        p.layers = p.layers.filter((l) => l.id !== layerId);
+        if (p.selectedLayerId === layerId) p.selectedLayerId = null;
+      });
+      bezierUiMode = null;
+      return false;
+    }
+    // First write the closed flag, then recentre to bbox centre — keeps the
+    // rotation pivot (= local origin) aligned with the visual centre.
+    if (close) {
+      store.update((p) => {
+        p.layers = p.layers.map((l) => {
+          if (l.id !== layerId || l.pattern.kind !== 'bezier') return l;
+          return { ...l, pattern: { ...l.pattern, params: { ...l.pattern.params, closed: true } } };
+        });
+      });
+    }
+    recentreBezierToBBox(layerId);
+    bezierUiMode = { layerId, mode: 'edit' };
+    return true;
+  }
+
+  // Discard an in-progress draft (Escape during draw).
+  function discardBezierDraft(layerId: string): void {
+    store.update((p) => {
+      p.layers = p.layers.filter((l) => l.id !== layerId);
+      if (p.selectedLayerId === layerId) p.selectedLayerId = null;
+    });
+    bezierUiMode = null;
+  }
+
+  // Insert a new anchor on the segment closest to `localHit`. Walks every
+  // cubic segment (incl. the closing one) sampling 32 points, picks the
+  // closest, then refines t via de Casteljau split for a shape-preserving cut.
+  function insertAnchorAt(layerId: string, localHit: { x: number; y: number }): void {
+    const sel = store.get().layers.find((l) => l.id === layerId);
+    if (!sel || sel.pattern.kind !== 'bezier') return;
+    const params = sel.pattern.params;
+    const anchors = params.anchors;
+    if (anchors.length < 2) return;
+    const SAMPLES = 32;
+    let best = { i: -1, t: 0, d2: Infinity };
+    const segCount = params.closed ? anchors.length : anchors.length - 1;
+    for (let i = 0; i < segCount; i++) {
+      const a = anchors[i];
+      const b = anchors[(i + 1) % anchors.length];
+      for (let s = 1; s < SAMPLES; s++) {
+        const t = s / SAMPLES;
+        const u = 1 - t;
+        const c1x = a.x + a.hxOut, c1y = a.y + a.hyOut;
+        const c2x = b.x + b.hxIn,  c2y = b.y + b.hyIn;
+        const x = u*u*u*a.x + 3*u*u*t*c1x + 3*u*t*t*c2x + t*t*t*b.x;
+        const y = u*u*u*a.y + 3*u*u*t*c1y + 3*u*t*t*c2y + t*t*t*b.y;
+        const d2 = (x - localHit.x)*(x - localHit.x) + (y - localHit.y)*(y - localHit.y);
+        if (d2 < best.d2) best = { i, t, d2 };
+      }
+    }
+    if (best.i < 0) return;
+    const a = anchors[best.i];
+    const b = anchors[(best.i + 1) % anchors.length];
+    const split = splitCubic(a, b, best.t);
+    store.update((p) => {
+      p.layers = p.layers.map((l) => {
+        if (l.id !== layerId || l.pattern.kind !== 'bezier') return l;
+        const next = [...l.pattern.params.anchors];
+        next[best.i] = { ...next[best.i], hxOut: split.aHxOut, hyOut: split.aHyOut };
+        const bIdx = (best.i + 1) % next.length;
+        next[bIdx] = { ...next[bIdx], hxIn: split.bHxIn, hyIn: split.bHyIn };
+        next.splice(best.i + 1, 0, split.newAnchor);
+        return { ...l, pattern: { ...l.pattern, params: { ...l.pattern.params, anchors: next } } };
+      });
+    });
+    recentreBezierToBBox(layerId);
+  }
+
+  // Mutate a single anchor in the bezier layer, given an index and a producer.
+  function updateAnchor(layerId: string, idx: number, mut: (a: BezierAnchor) => BezierAnchor): void {
+    store.update((p) => {
+      p.layers = p.layers.map((l) => {
+        if (l.id !== layerId || l.pattern.kind !== 'bezier') return l;
+        const anchors = l.pattern.params.anchors.map((a, i) => i === idx ? mut(a) : a);
+        return { ...l, pattern: { ...l.pattern, params: { ...l.pattern.params, anchors } } };
+      });
+    });
+  }
+
+  // Propagate the dragged handle to the opposite one per anchor type.
+  function applyHandleType(a: BezierAnchor, side: 'in' | 'out'): BezierAnchor {
+    if (a.type === 'corner') return a;
+    if (side === 'in') {
+      if (a.type === 'smooth') {
+        const len = Math.hypot(a.hxOut, a.hyOut);
+        const lin = Math.hypot(a.hxIn, a.hyIn);
+        if (lin === 0 || len === 0) return { ...a, hxOut: -a.hxIn, hyOut: -a.hyIn };
+        const k = len / lin;
+        return { ...a, hxOut: -a.hxIn * k, hyOut: -a.hyIn * k };
+      }
+      // symmetric
+      return { ...a, hxOut: -a.hxIn, hyOut: -a.hyIn };
+    }
+    if (a.type === 'smooth') {
+      const lin = Math.hypot(a.hxIn, a.hyIn);
+      const lout = Math.hypot(a.hxOut, a.hyOut);
+      if (lin === 0 || lout === 0) return { ...a, hxIn: -a.hxOut, hyIn: -a.hyOut };
+      const k = lin / lout;
+      return { ...a, hxIn: -a.hxOut * k, hyIn: -a.hyOut * k };
+    }
+    return { ...a, hxIn: -a.hxOut, hyIn: -a.hyOut };
+  }
+
   window.addEventListener('mousemove', (e) => {
     if (!drag) return;
     if (drag.kind === 'pan') {
@@ -752,6 +1305,54 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
     }
     if (drag.kind === 'edge') {
       applyZoneEdgeDrag(drag, e);
+      return;
+    }
+    if (drag.kind === 'bezier-anchor' || drag.kind === 'bezier-handle' || drag.kind === 'bezier-pen-handle') {
+      const dragLayerId = drag.layerId;
+      const sel = store.get().layers.find((l) => l.id === dragLayerId);
+      if (!sel || sel.pattern.kind !== 'bezier') return;
+      const posMm = screenToCanvas(e.clientX, e.clientY);
+      const local = canvasToBezierLocal(sel, posMm.x, posMm.y);
+      if (drag.kind === 'bezier-anchor') {
+        const d = drag;
+        const dx = local.x - d.startLocal.x;
+        const dy = local.y - d.startLocal.y;
+        updateAnchor(d.layerId, d.idx, (a) => ({
+          ...a,
+          x: d.baseAnchor.x + dx,
+          y: d.baseAnchor.y + dy,
+        }));
+        return;
+      }
+      if (drag.kind === 'bezier-handle') {
+        const d = drag;
+        const a = d.baseAnchor;
+        const newHx = local.x - a.x;
+        const newHy = local.y - a.y;
+        updateAnchor(d.layerId, d.idx, (cur) => {
+          let next: BezierAnchor;
+          if (d.side === 'in') next = { ...cur, hxIn: newHx, hyIn: newHy };
+          else                 next = { ...cur, hxOut: newHx, hyOut: newHy };
+          return applyHandleType(next, d.side);
+        });
+        return;
+      }
+      // bezier-pen-handle: drag-out during the very first mousedown on a new
+      // anchor. Start symmetric so the user gets a curve preview right away.
+      const d = drag;
+      const anchorState = store.get().layers
+        .find((l) => l.id === d.layerId)?.pattern.params as BezierParams | undefined;
+      if (!anchorState) return;
+      const a = anchorState.anchors[d.idx];
+      if (!a) return;
+      const dxH = local.x - a.x;
+      const dyH = local.y - a.y;
+      updateAnchor(d.layerId, d.idx, (cur) => ({
+        ...cur,
+        hxOut: dxH, hyOut: dyH,
+        hxIn: -dxH, hyIn: -dyH,
+        type: 'symmetric',
+      }));
       return;
     }
     let dxPx = e.clientX - drag.startX;
@@ -776,20 +1377,110 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
 
   window.addEventListener('mouseup', () => {
     if (!drag) return;
-    // Mouseup with no significant move on a selected text layer → inline edit.
+    // Mouseup with no significant move on a selected text or bezier layer
+    // triggers the kind-appropriate "tap" action: text → inline edit, bezier
+    // → enter edit mode (from bounds).
     if (drag.kind === 'layer' && drag.potentialEdit) {
       const layerId = drag.layerId;
       const clickEvt = drag.editClickEvent;
       drag = null;
       viewport.classList.remove('panning', 'dragging-layer', 'resizing-zone');
       viewport.style.cursor = '';
-      enterTextEdit(layerId, clickEvt);
+      const tappedLayer = store.get().layers.find((l) => l.id === layerId);
+      if (tappedLayer?.pattern.kind === 'bezier') {
+        bezierUiMode = { layerId, mode: 'edit' };
+        rerender();
+      } else if (tappedLayer?.pattern.kind === 'text') {
+        enterTextEdit(layerId, clickEvt);
+      }
       return;
     }
+    const completed = drag;
     drag = null;
     viewport.classList.remove('panning', 'dragging-layer', 'resizing-zone');
     viewport.style.cursor = '';
+    // Recentre bezier after any drag that changed anchor geometry — keeps
+    // the bbox centre aligned with the rotation pivot. Pen-handle drags
+    // (draw mode) intentionally don't recentre: the user is still placing
+    // anchors and shifting their canvas positions mid-gesture would be
+    // disorienting; we recentre once at commit time instead.
+    if (completed.kind === 'bezier-anchor' || completed.kind === 'bezier-handle') {
+      recentreBezierToBBox(completed.layerId);
+    } else if (completed.kind === 'edge' && completed.bezierBase) {
+      recentreBezierToBBox(completed.layerId);
+    }
   });
+
+  // Bezier mode transitions via keyboard. Order matters: text editor owns its
+  // keys first; then we look at the current mode (draw / edit) and the key.
+  window.addEventListener('keydown', (e) => {
+    if (textEditingId) return; // inline text editor owns the keyboard
+    const project = store.get();
+    const sel = project.layers.find((l) => l.id === project.selectedLayerId);
+    if (!sel || sel.pattern.kind !== 'bezier') return;
+    const mode = getBezierMode();
+
+    if (mode === 'draw' && !drag) {
+      if (e.key === 'Enter') {
+        commitBezierDraft(sel.id, false);
+        rerender();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === 'Escape') {
+        // Cancel the in-progress trace entirely.
+        discardBezierDraft(sel.id);
+        rerender();
+        e.preventDefault();
+        return;
+      }
+    }
+
+    if (mode === 'edit' && !drag && e.key === 'Escape') {
+      bezierUiMode = null;
+      activeAnchorIdx = null;
+      rerender();
+      e.preventDefault();
+      return;
+    }
+
+    if ((e.key === 'Backspace' || e.key === 'Delete') && mode === 'edit') {
+      if (drag) return;
+      const layerId = sel.id;
+      const idx = activeAnchorIdx && activeAnchorIdx.layerId === layerId
+        ? activeAnchorIdx.idx
+        : sel.pattern.params.anchors.length - 1;
+      if (idx < 0) return;
+      deleteBezierAnchor(layerId, idx);
+      e.preventDefault();
+    }
+  });
+
+  // Remove an anchor at `idx`. If the layer ends up with zero anchors, the
+  // whole layer is removed (a bezier with no points is meaningless and would
+  // otherwise become invisible-but-still-listed dead weight).
+  function deleteBezierAnchor(layerId: string, idx: number): void {
+    store.update((p) => {
+      const layer = p.layers.find((l) => l.id === layerId);
+      if (!layer || layer.pattern.kind !== 'bezier') return;
+      const next = layer.pattern.params.anchors.filter((_, i) => i !== idx);
+      if (next.length === 0) {
+        p.layers = p.layers.filter((l) => l.id !== layerId);
+        if (p.selectedLayerId === layerId) p.selectedLayerId = null;
+        return;
+      }
+      p.layers = p.layers.map((l) => {
+        if (l.id !== layerId || l.pattern.kind !== 'bezier') return l;
+        return { ...l, pattern: { ...l.pattern, params: { ...l.pattern.params, anchors: next } } };
+      });
+    });
+    activeAnchorIdx = null;
+    if (!store.get().layers.some((l) => l.id === layerId)) {
+      bezierUiMode = null;
+    } else {
+      recentreBezierToBBox(layerId);
+    }
+  }
 
   viewport.addEventListener('dragover', (e) => {
     if (!e.dataTransfer) return;
@@ -840,12 +1531,23 @@ export function mountCanvasPanel(container: HTMLElement, store: Store): void {
         p.layers = p.layers.map((l) => {
           if (l.id !== d.layerId) return l;
           const base = l.pattern.params as unknown as Record<string, unknown>;
-          const np = d.scaleBase !== undefined
-            ? { ...base, scale: d.scaleBase }
-            : { ...base, [d.widthKey]: d.baseZw, [d.heightKey]: d.baseZh };
+          const np = d.bezierBase
+            ? { ...base, anchors: d.bezierBase.anchors }
+            : d.scaleBase !== undefined
+              ? { ...base, scale: d.scaleBase }
+              : { ...base, [d.widthKey]: d.baseZw, [d.heightKey]: d.baseZh };
           return { ...l, offsetX: d.baseOffsetX, offsetY: d.baseOffsetY, pattern: { ...l.pattern, params: np } as Layer['pattern'] };
         });
       });
+    } else if (drag.kind === 'bezier-anchor' || drag.kind === 'bezier-handle') {
+      // Restore the base anchor — wipes whatever ongoing drag did to it.
+      const d = drag;
+      updateAnchor(d.layerId, d.idx, () => d.baseAnchor);
+    } else if (drag.kind === 'bezier-pen-handle') {
+      // Pen-handle Escape: keep the anchor but zero its handles (it was just
+      // placed; user effectively cancels the drag-out gesture).
+      const d = drag;
+      updateAnchor(d.layerId, d.idx, (a) => ({ ...a, hxIn: 0, hyIn: 0, hxOut: 0, hyOut: 0 }));
     } else {
       const id = drag.layerId;
       const ox = drag.baseOx;

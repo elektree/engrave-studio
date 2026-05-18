@@ -75,6 +75,12 @@ export function mountLayersPanel(container: HTMLElement, store: Store): void {
           l.offsetX = p.canvas.width / 2;
           l.offsetY = p.canvas.height / 2;
         }
+        if (kind === 'bezier') {
+          // Empty anchor list — canvas-panel detects this and enters pen-tool
+          // draw mode. offsetX/Y is the local origin where future clicks land.
+          l.offsetX = p.canvas.width / 2;
+          l.offsetY = p.canvas.height / 2;
+        }
         // New frieze layers are vertically centred — the strip lives around the
         // layer's local y=0, and offsetY positions it.
         if (kind === 'frieze') {

@@ -6,6 +6,7 @@ import { renderText } from './text';
 import { renderMaze, defaultMazeParams } from './maze';
 import { renderShape, defaultShapeParams } from './shape';
 import { renderSvgLayer, defaultSvgLayerParams } from './svg-layer';
+import { renderBezier, defaultBezierParams } from './bezier';
 
 export function renderLayer(layer: Layer, project: Project): SVGElement[] {
   switch (layer.pattern.kind) {
@@ -16,6 +17,7 @@ export function renderLayer(layer: Layer, project: Project): SVGElement[] {
     case 'maze':      return renderMaze(layer.pattern.params, project, layer);
     case 'shape':     return renderShape(layer.pattern.params, project, layer);
     case 'svg':       return renderSvgLayer(layer.pattern.params, project, layer);
+    case 'bezier':    return renderBezier(layer.pattern.params, project, layer);
   }
 }
 
@@ -28,7 +30,8 @@ export function defaultPatternForKind(kind: PatternKind, canvas?: Canvas, kerf =
     case 'maze':      return { kind: 'maze',      params: defaultMazeParams(canvas, kerf) };
     case 'shape':     return { kind: 'shape',     params: defaultShapeParams(kerf) };
     case 'svg':       return { kind: 'svg',       params: defaultSvgLayerParams('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="none" stroke="#000" stroke-width="0.2"/></svg>', 3, kerf) };
+    case 'bezier':    return { kind: 'bezier',    params: defaultBezierParams(kerf) };
   }
 }
 
-export const PATTERN_KINDS: PatternKind[] = ['geometric', 'frieze', 'scatter', 'text', 'maze', 'shape', 'svg'];
+export const PATTERN_KINDS: PatternKind[] = ['geometric', 'frieze', 'scatter', 'text', 'maze', 'shape', 'svg', 'bezier'];

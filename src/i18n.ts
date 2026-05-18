@@ -10,10 +10,12 @@ const FR: Record<string, string> = {
   maze: 'labyrinthe',
   shape: 'forme',
   svg: 'SVG',
+  bezier: 'bézier',
 
   // Shape kinds
   rect: 'rectangle',
   ellipse: 'ellipse',
+  polygon: 'polygone',
 
   // Maze stroke styles & cell shapes
   square: 'carré',

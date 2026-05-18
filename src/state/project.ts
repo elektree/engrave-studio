@@ -116,6 +116,21 @@ export type ShapeParams = {
   sides: number;          // polygon only — number of vertices
 };
 
+export type BezierAnchorType = 'line' | 'corner' | 'smooth' | 'symmetric';
+export type BezierAnchor = {
+  x: number; y: number;             // anchor position in local mm (centred coords)
+  hxIn: number; hyIn: number;       // incoming handle offset relative to the anchor
+  hxOut: number; hyOut: number;     // outgoing handle offset relative to the anchor
+  type: BezierAnchorType;           // governs handle propagation while editing
+};
+export type BezierParams = {
+  anchors: BezierAnchor[];
+  closed: boolean;
+  rotation: number;       // degrees, around the centroid (local origin)
+  strokeWidth: number;    // mm — used when outlined or path is open
+  outlined: boolean;      // true → stroke, false → fill (silently forced to stroke when open)
+};
+
 export type SvgLayerParams = {
   svgText: string;        // raw SVG markup
   scale: number;          // uniform scale factor — preserves aspect ratio
@@ -145,7 +160,8 @@ export type Pattern =
   | { kind: 'text';      params: TextParams }
   | { kind: 'maze';      params: MazeParams }
   | { kind: 'shape';     params: ShapeParams }
-  | { kind: 'svg';       params: SvgLayerParams };
+  | { kind: 'svg';       params: SvgLayerParams }
+  | { kind: 'bezier';    params: BezierParams };
 
 export type PatternKind = Pattern['kind'];
 

@@ -16,6 +16,7 @@ import {
 import { shapePath } from '../patterns/scatter';
 import { scaleForTargetSize } from '../patterns/svg-layer';
 import { makeSvg } from '../utils/svg';
+import { bezierShapeBBox } from '../patterns/bezier';
 
 type FieldDef =
   | { kind: 'number'; key: string; label: string; min?: number; max?: number; step?: number; modulatable?: boolean; hideModToggle?: boolean }
@@ -117,6 +118,18 @@ function shapeFieldsFor(params: { shape: string }): FieldDef[] {
   return fields;
 }
 
+const BEZIER_FIELDS: FieldDef[] = [
+  // Synthetic dimension fields — derive their value from the current bbox of
+  // anchors and write back as a uniform-per-axis scale. Routed to a custom
+  // handler in makeField.
+  { kind: 'number', key: '__bezier_width__',  label: 'largeur (mm)', min: 0.1, step: 0.1 },
+  { kind: 'number', key: '__bezier_height__', label: 'hauteur (mm)', min: 0.1, step: 0.1 },
+  { kind: 'slider', key: 'rotation', label: 'rotation (°)', min: 0, max: 360, step: 1 },
+  { kind: 'number', key: 'strokeWidth', label: 'trait (mm)', min: 0.05, step: 0.05 },
+  { kind: 'checkbox', key: 'outlined', label: 'contours' },
+  { kind: 'checkbox', key: 'closed', label: 'fermé' },
+];
+
 const SVG_FIELDS: FieldDef[] = [
   // __svg_thumb__ is a synthetic key that renders the SVG preview thumbnail and
   // opens the file picker on click. Always first so it's visible at a glance.
@@ -162,6 +175,7 @@ function patternFieldsFor(layer: Layer): FieldDef[] {
     case 'maze':      return MAZE_FIELDS;
     case 'shape':     return shapeFieldsFor(layer.pattern.params);
     case 'svg':       return SVG_FIELDS;
+    case 'bezier':    return BEZIER_FIELDS;
   }
 }
 
@@ -406,6 +420,11 @@ function makeField(f: FieldDef, scope: Scope, layer: Layer, parent: HTMLElement,
   }
   if (scope === 'pattern' && f.key === '__svg_thumb__' && layer.pattern.kind === 'svg') {
     return makeSvgThumbField(f, layer, parent, store);
+  }
+  if (scope === 'pattern'
+      && (f.key === '__bezier_width__' || f.key === '__bezier_height__')
+      && layer.pattern.kind === 'bezier') {
+    return makeBezierDimensionField(f, layer, parent, store);
   }
   // Rotation fields get a dial control instead of a slider — way more direct.
   if (scope === 'pattern' && f.key === 'rotation') return makeRotationField(f, scope, layer, parent, store);
@@ -729,6 +748,74 @@ function makeSvgThumbField(f: FieldDef, layer: Layer, parent: HTMLElement, store
     const current = store.get().layers.find((l) => l.id === layer.id);
     if (!current || current.pattern.kind !== 'svg') return;
     setThumb(current.pattern.params.svgText);
+  };
+  return { kind: 'callback', def: f, scope: 'pattern', refresh };
+}
+
+function makeBezierDimensionField(f: FieldDef, layer: Layer, parent: HTMLElement, store: Store): FieldEntry {
+  // Synthetic field: derives its displayed value from the bbox of anchors,
+  // and on input scales every anchor + handle on the corresponding axis so
+  // the new bbox matches the typed value. Width and height share the
+  // implementation (which axis depends on f.key).
+  const axis: 'x' | 'y' = f.key === '__bezier_width__' ? 'x' : 'y';
+
+  const lbl = document.createElement('label');
+  lbl.className = 'props-field';
+  const span = document.createElement('span');
+  span.textContent = f.label;
+  lbl.appendChild(span);
+
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.step = '0.1';
+  input.min = '0.1';
+
+  const readCurrent = (): number => {
+    const cur = store.get().layers.find((l) => l.id === layer.id);
+    if (!cur || cur.pattern.kind !== 'bezier') return 0;
+    const bb = bezierShapeBBox(cur.pattern.params.anchors, cur.pattern.params.closed);
+    return axis === 'x' ? Math.max(0, bb.x1 - bb.x0) : Math.max(0, bb.y1 - bb.y0);
+  };
+  input.value = readCurrent().toFixed(2);
+
+  input.oninput = () => {
+    const target = Number(input.value);
+    if (!Number.isFinite(target) || target <= 0) return;
+    const cur = store.get().layers.find((l) => l.id === layer.id);
+    if (!cur || cur.pattern.kind !== 'bezier') return;
+    const bb = bezierShapeBBox(cur.pattern.params.anchors, cur.pattern.params.closed);
+    const oldSize = axis === 'x' ? bb.x1 - bb.x0 : bb.y1 - bb.y0;
+    if (oldSize <= 0) return;
+    const ratio = target / oldSize;
+    if (!Number.isFinite(ratio) || ratio <= 0) return;
+    const cxBb = (bb.x0 + bb.x1) / 2;
+    const cyBb = (bb.y0 + bb.y1) / 2;
+    // Scale around the bbox centre so the visual centre stays put; recentre
+    // happens implicitly because bbox centre is preserved on the scaled axis.
+    store.update((p) => {
+      p.layers = p.layers.map((l) => {
+        if (l.id !== layer.id || l.pattern.kind !== 'bezier') return l;
+        const anchors = l.pattern.params.anchors.map((a) => {
+          const nx = axis === 'x' ? cxBb + (a.x - cxBb) * ratio : a.x;
+          const ny = axis === 'y' ? cyBb + (a.y - cyBb) * ratio : a.y;
+          const hxIn  = axis === 'x' ? a.hxIn  * ratio : a.hxIn;
+          const hyIn  = axis === 'y' ? a.hyIn  * ratio : a.hyIn;
+          const hxOut = axis === 'x' ? a.hxOut * ratio : a.hxOut;
+          const hyOut = axis === 'y' ? a.hyOut * ratio : a.hyOut;
+          return { ...a, x: nx, y: ny, hxIn, hyIn, hxOut, hyOut };
+        });
+        return { ...l, pattern: { ...l.pattern, params: { ...l.pattern.params, anchors } } };
+      });
+    });
+  };
+
+  lbl.appendChild(input);
+  parent.appendChild(lbl);
+
+  const refresh = () => {
+    if (document.activeElement === input) return; // don't trample user typing
+    const next = readCurrent().toFixed(2);
+    if (input.value !== next) input.value = next;
   };
   return { kind: 'callback', def: f, scope: 'pattern', refresh };
 }
